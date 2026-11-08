@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Miuix draws all of its own surfaces, so the platform theme only needs to
+      provide a window background and keep the action bar out of the way.
+    -->
+    <style name="Theme.SteamEnhanced" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>

@@ -1,0 +1,54 @@
+# Gradle, Kotlin, and Android build caches and outputs (all modules)
+.gradle/
+.kotlin/
+build/
+.externalNativeBuild/
+.cxx/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.hprof
+
+# Machine-specific SDK paths and IDE state
+local.properties
+.idea/
+*.iml
+.vscode/
+.fleet/
+
+# Signing keys and local credentials
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+secrets.properties
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+
+# Steam authenticator exports and local vault data
+*.maFile
+*.mafile
+/maFiles/
+/vault/
+/vault-exports/
+
+# Editor backups, logs, and operating-system metadata
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# Keep Gradle wrapper binaries and shared project configuration tracked.
+!gradle/wrapper/gradle-wrapper.jar

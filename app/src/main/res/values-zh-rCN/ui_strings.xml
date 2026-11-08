@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ui_add_account">添加账号</string>
+    <string name="ui_sign_in_summary">登录 Steam，管理账号并设置 Steam 令牌。</string>
+    <string name="ui_preparing_vault">正在准备保险库…</string>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ui_add_account">Add account</string>
+    <string name="ui_sign_in_summary">Sign in to Steam to manage your account and set up Steam Guard.</string>
+    <string name="ui_preparing_vault">Preparing your vault…</string>
+</resources>
