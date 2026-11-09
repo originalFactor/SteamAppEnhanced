@@ -29,7 +29,7 @@ internal data class VaultState(
 
 internal data class ImportReport(val imported: Int, val skipped: Int, val unreadable: Int)
 
-internal class AccountVault(context: Context) {
+internal class AccountVault(context: Context) : VaultUnlockTarget {
     private val storage = StorageProvider(context.noBackupFilesDir)
     private val prefs = context.getSharedPreferences(VaultKeyStore.PREFS_NAME, Context.MODE_PRIVATE)
     val protectedSettings = VaultKeyStore(prefs)
@@ -39,15 +39,11 @@ internal class AccountVault(context: Context) {
     private val mutableState = MutableStateFlow(VaultState(initialized = protectedSettings.exists()))
     val state = mutableState.asStateFlow()
 
-    fun needsPinMigration(): Boolean = protectedSettings.needsMigration()
+    override val isUnlocked: Boolean get() = state.value.unlocked
 
-    suspend fun initializeIfNeeded() = disk {
-        // Only a new installation is opened automatically. Never reopen a locked
-        // vault or bypass the PIN migration of an existing installation.
-        if (!protectedSettings.exists()) openVault()
-    }
+    override fun needsPinMigration(): Boolean = protectedSettings.needsMigration()
 
-    suspend fun open() = disk { openVault() }
+    override suspend fun open() = disk { openVault() }
 
     private suspend fun openVault() {
         check(!protectedSettings.needsMigration()) { "Migrate the existing vault first." }
@@ -87,7 +83,7 @@ internal class AccountVault(context: Context) {
         return key
     }
 
-    suspend fun openWithDeviceKey(key: ByteArray) = disk {
+    override suspend fun openWithDeviceKey(key: ByteArray) = disk {
         check(protectedSettings.exists()) { "Set up a vault first." }
         loadWithKey(key.copyOf())
         if (protectedSettings.needsMigration()) protectedSettings.storeKey(checkNotNull(vaultKey))
@@ -133,16 +129,32 @@ internal class AccountVault(context: Context) {
 
     suspend fun save(account: SteamGuardAccount) = disk {
         val open = requireOpen()
-        check(open.saveAccount(account)) { "The account could not be saved." }
+        val current = mutableState.value.accounts.firstOrNull { AccountStore.storageId(it) == AccountStore.storageId(account) }
+        val updated = current?.let(account::withProfileFrom) ?: account
+        check(open.saveAccount(updated)) { "The account could not be saved." }
         mutableState.value = readState(open)
+    }
+
+    suspend fun saveProfile(profile: SteamGuardAccount): Boolean = disk {
+        // A network response may arrive after locking, deleting an account, or
+        // refreshing its session. Only merge into an account that still exists.
+        val open = store ?: return@disk false
+        val current = mutableState.value.accounts.firstOrNull {
+            AccountStore.storageId(it) == AccountStore.storageId(profile)
+        } ?: return@disk false
+        check(open.saveAccount(current.withProfileFrom(profile))) { "The profile could not be saved." }
+        mutableState.value = readState(open)
+        true
     }
 
     suspend fun saveAuthenticator(account: SteamGuardAccount) = disk {
         val open = requireOpen()
+        val current = mutableState.value.accounts.firstOrNull { AccountStore.storageId(it) == AccountStore.storageId(account) }
+        val updated = current?.let(account::withProfileFrom) ?: account
         // Keep a separately protected copy before replacing a local authenticator.
         // Steam may already have revoked the old one.
-        runCatching { protectedSettings.writeProtected(RECOVERY, account.toJson().toString()) }
-        if (!open.saveAccount(account)) {
+        runCatching { protectedSettings.writeProtected(RECOVERY, updated.toJson().toString()) }
+        if (!open.saveAccount(updated)) {
             mutableState.value = readState(open)
             error("Steam returned new authenticator secrets, but saving the account failed.")
         }

@@ -6,14 +6,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
 internal enum class Appearance { SYSTEM, LIGHT, DARK }
-internal enum class Skin { STEAM, NEON, PIXEL }
 
 internal class AppPreferences(context: Context) {
     private val prefs = context.getSharedPreferences("interface", Context.MODE_PRIVATE)
 
     var appearance by mutableStateOf(read("appearance", Appearance.SYSTEM))
         private set
-    var skin by mutableStateOf(read("skin", Skin.STEAM))
+    var activeAccountId by mutableStateOf(
+        if (prefs.contains("active_account")) prefs.getLong("active_account", 0L) else null,
+    )
         private set
     var autoSync by mutableStateOf(prefs.getBoolean("auto_sync", false))
         private set
@@ -27,9 +28,12 @@ internal class AppPreferences(context: Context) {
         appearance = value
     }
 
-    fun useSkin(value: Skin) {
-        prefs.edit().putString("skin", value.name).apply()
-        skin = value
+    fun useAccount(id: Long?) {
+        if (id == activeAccountId) return
+        val editor = prefs.edit()
+        if (id == null) editor.remove("active_account") else editor.putLong("active_account", id)
+        editor.apply()
+        activeAccountId = id
     }
 
     fun useAutoSync(value: Boolean) {

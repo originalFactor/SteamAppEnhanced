@@ -1,9 +1,12 @@
 package cc.ptoe.steam.enhanced.protocol
 
 import cc.ptoe.steam.enhanced.core.dlog
+import cc.ptoe.steam.enhanced.core.JsonCoerce
+import cc.ptoe.steam.enhanced.core.model.TradeOffer
 import cc.ptoe.steam.enhanced.core.model.FamilyGroupInfo
 import cc.ptoe.steam.enhanced.core.model.FamilyInvite
 import cc.ptoe.steam.enhanced.core.model.FamilyMember
+import cc.ptoe.steam.enhanced.core.model.FamilyPersona
 import cc.ptoe.steam.enhanced.core.model.FamilyUserState
 import cc.ptoe.steam.enhanced.core.model.InviteChecks
 import cc.ptoe.steam.enhanced.core.model.JoinResult
@@ -13,6 +16,12 @@ import cc.ptoe.steam.enhanced.core.proto.ProtoWriter
 import cc.ptoe.steam.enhanced.net.SteamApiClient
 import cc.ptoe.steam.enhanced.net.SteamApiException
 import cc.ptoe.steam.enhanced.net.requireAccessToken
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * Steam Family Groups (`IFamilyGroupsService`, webui protobuf surface).
@@ -25,6 +34,30 @@ import cc.ptoe.steam.enhanced.net.requireAccessToken
  * real device, not guessable from the response).
  */
 class FamilyGroupsClient(private val api: SteamApiClient) {
+
+    /** Public nicknames and avatars; account login names are only known locally. */
+    suspend fun memberProfiles(steamIds: Collection<Long>): Map<Long, FamilyPersona> = coroutineScope {
+        val requests = Semaphore(4)
+        steamIds.distinct().filter {
+            it > TradeOffer.STEAM_ID64_BASE && it - TradeOffer.STEAM_ID64_BASE <= 0xFFFF_FFFFL
+        }.map { steamId ->
+            async {
+                requests.withPermit {
+                    try {
+                        val accountId = steamId - TradeOffer.STEAM_ID64_BASE
+                        val json = api.communityGetJson("/miniprofile/$accountId/json", emptyMap())
+                        val nickname = JsonCoerce.asString(json["persona_name"]).trim().takeIf(String::isNotEmpty)
+                        val avatar = JsonCoerce.asString(json["avatar_url"]).trim().takeIf(String::isNotEmpty)
+                        if (nickname != null || avatar != null) steamId to FamilyPersona(nickname, avatar) else null
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+            }
+        }.awaitAll().filterNotNull().toMap()
+    }
 
     /** This account's family situation: current group + pending invites. */
     suspend fun forUser(account: SteamGuardAccount): FamilyUserState {

@@ -16,6 +16,10 @@ android {
         versionName = "1.0"
     }
 
+    androidResources {
+        localeFilters += listOf("zh-rCN", "en-rUS")
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -62,6 +66,11 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
     implementation(libs.zxing)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.mlkit.vision)
+    implementation(libs.mlkit.barcode.scanning)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 

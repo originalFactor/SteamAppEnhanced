@@ -104,7 +104,7 @@ internal object ApngDecoder {
                 paint.xfermode = if (frame.blend == 0) PorterDuffXfermode(PorterDuff.Mode.SRC) else null
                 canvas.drawBitmap(frameImage, frame.x.toFloat(), frame.y.toFloat(), paint)
                 frameImage.recycle()
-                output += ApngFrame(checkNotNull(canvasBitmap.copy(Bitmap.Config.ARGB_8888, false)), frame.delay)
+                output += ApngFrame(checkNotNullUi(canvasBitmap.copy(Bitmap.Config.ARGB_8888, false)), frame.delay)
                 if (frame.dispose == 1) {
                     paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
                     canvas.drawRect(frame.x.toFloat(), frame.y.toFloat(),

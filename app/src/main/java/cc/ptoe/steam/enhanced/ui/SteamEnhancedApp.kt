@@ -6,6 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.platform.LocalResources
+import cc.ptoe.steam.enhanced.app.steamLanguage
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -32,10 +37,14 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import android.app.Activity
+import androidx.core.view.WindowCompat
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -43,7 +52,6 @@ import androidx.lifecycle.LifecycleOwner
 import cc.ptoe.steam.enhanced.app.AccountVault
 import cc.ptoe.steam.enhanced.app.SelectedMaFiles
 import cc.ptoe.steam.enhanced.app.SteamAppState
-import cc.ptoe.steam.enhanced.app.SteamProfile
 import cc.ptoe.steam.enhanced.app.readMaFiles
 import cc.ptoe.steam.enhanced.app.writeDocument
 import cc.ptoe.steam.enhanced.core.SteamTotp
@@ -62,37 +70,40 @@ import top.yukonga.miuix.kmp.basic.NavigationBarDefaults
 import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Add
-import top.yukonga.miuix.kmp.icon.extended.AddCircle
 import top.yukonga.miuix.kmp.icon.extended.Back
-import top.yukonga.miuix.kmp.icon.extended.Home
+import top.yukonga.miuix.kmp.icon.extended.ContactsCircle
+import top.yukonga.miuix.kmp.icon.extended.Scan
+import top.yukonga.miuix.kmp.icon.extended.Import
+import top.yukonga.miuix.kmp.icon.extended.Info
+import top.yukonga.miuix.kmp.icon.extended.Lock
 import top.yukonga.miuix.kmp.icon.extended.Settings
-import top.yukonga.miuix.kmp.preference.ArrowPreference
+import top.yukonga.miuix.kmp.icon.extended.Tasks
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
 
 internal enum class Page(val title: Int) {
-    HOME(R.string.ava_steam_guard),
-    ADD(R.string.ui_add_account),
-    ACCOUNT(R.string.ava_nav_accounts),
+    HOME(R.string.ui_authenticator),
     LOGIN(R.string.ava_login_title),
-    ENROLL(R.string.ava_add_auth_title),
+    LOGIN_QR(R.string.ava_login_via_qr),
+    LOGIN_VERIFY(R.string.ui_two_factor_title),
+    LOGIN_RECOVER(R.string.ui_recovery_start_title),
+    ENROLL(R.string.ui_transfer_to_app),
     PENDING(R.string.ava_pending_title),
-    APPROVE(R.string.ava_approve_title),
-    DEVICES(R.string.ava_device_sessions_title),
+    DEVICES(R.string.ui_device_management),
     FAMILY(R.string.ava_fam_account_action),
     MARKET(R.string.ava_action_market),
     REDEEM(R.string.ava_key_redeem_title),
-    SETTINGS(R.string.ava_nav_settings),
+    ME(R.string.ui_me),
     SYNC(R.string.ava_sync_title),
 }
 
 @Composable
 internal fun SteamEnhancedApp(app: SteamAppState) {
     val preferences = app.preferences
-    SteamEnhancedTheme(preferences.appearance, preferences.skin) {
+    SteamEnhancedTheme(preferences.appearance) {
         AppContent(app)
     }
 }
@@ -102,28 +113,49 @@ private fun AppContent(app: SteamAppState) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val vault = app.vault
+    val deviceUnlock = rememberVaultDeviceUnlock()
     val services = app.services
     val sync = app.sync
     val preferences = app.preferences
-    val work = remember(scope) { AppWork(scope) }
+    val resources by rememberUpdatedState(LocalResources.current)
+    val work = remember(scope) { AppWork(scope) { resources } }
+    SideEffect { services.api.steamLanguage = steamLanguage(resources.configuration.locales[0]) }
     val state by vault.state.collectAsState()
+    var loginQrAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var page by rememberSaveable { mutableStateOf(Page.HOME) }
+    var rootPage by rememberSaveable { mutableStateOf(Page.HOME) }
     var selected by rememberSaveable { mutableStateOf<Long?>(null) }
+    var transferAfterLogin by rememberSaveable { mutableStateOf(false) }
     var bundle by remember { mutableStateOf<SelectedMaFiles?>(null) }
     var exportId by rememberSaveable { mutableStateOf<Long?>(null) }
     var exportRecovery by rememberSaveable { mutableStateOf(false) }
-    var pendingLogins by remember { mutableStateOf(setOf<Long>()) }
     var foreground by remember { mutableStateOf(true) }
     var initializing by remember(vault) { mutableStateOf(true) }
+    val cameraHome = state.unlocked && page == Page.HOME && bundle == null && !initializing && !state.hasRecovery
+    val pendingHome = state.unlocked && page == Page.PENDING && bundle == null && !initializing
+    val devicesPage = state.unlocked && page == Page.DEVICES && bundle == null && !initializing
+    DisposableEffect(context, cameraHome) {
+        val window = (context as? Activity)?.window
+        val controller = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
+        val wasLight = controller?.isAppearanceLightStatusBars
+        if (cameraHome) controller?.isAppearanceLightStatusBars = false
+        onDispose { if (wasLight != null) controller?.isAppearanceLightStatusBars = wasLight }
+    }
     val pageStates = rememberSaveableStateHolder()
     val scrollBehavior = key(page) { MiuixScrollBehavior() }
-    val isRootPage = page == Page.HOME || page == Page.ADD || page == Page.SETTINGS
+    val isRootPage = page == Page.HOME || page == Page.PENDING || page == Page.ME
     val account = state.accounts.firstOrNull { AccountStore.storageId(it) == selected }
+    val profileAccount = state.accounts.firstOrNull { AccountStore.storageId(it) == preferences.activeAccountId }
+        ?: state.accounts.firstOrNull()
+
+    LaunchedEffect(state.unlocked, profileAccount?.let(AccountStore::storageId)) {
+        if (state.unlocked) preferences.useAccount(profileAccount?.let(AccountStore::storageId))
+    }
 
     LaunchedEffect(vault) {
         work.run {
             try {
-                vault.initializeIfNeeded()
+                app.unlockController.onOpen(deviceUnlock)
             } finally {
                 initializing = false
             }
@@ -132,6 +164,8 @@ private fun AppContent(app: SteamAppState) {
 
     fun navigate(destination: Page) {
         work.feedback = null
+        if (destination !in listOf(Page.LOGIN, Page.LOGIN_QR, Page.LOGIN_VERIFY, Page.LOGIN_RECOVER)) transferAfterLogin = false
+        if (destination == Page.HOME || destination == Page.PENDING || destination == Page.ME) rootPage = destination
         page = destination
     }
 
@@ -143,13 +177,14 @@ private fun AppContent(app: SteamAppState) {
                 Lifecycle.Event.ON_START -> {
                     foreground = true
                     if (stoppedAt > 0L && android.os.SystemClock.elapsedRealtime() - stoppedAt >= 120_000 &&
-                        vault.state.value.unlocked && !work.busy && exportId == null && !exportRecovery
+                        vault.state.value.unlocked && !work.busy && app.authenticatorRecovery.pending.value == null && exportId == null && !exportRecovery
                     ) {
                         work.run {
                             vault.lock()
                             selected = null
                             bundle = null
                             navigate(Page.HOME)
+                            app.unlockController.unlock(deviceUnlock)
                         }
                     }
                 }
@@ -171,7 +206,7 @@ private fun AppContent(app: SteamAppState) {
             if (incoming.manifest?.encrypted == true) bundle = incoming
             else {
                 val report = vault.import(incoming.files, incoming.manifest, null)
-                work.feedback = "Imported ${report.imported}, skipped ${report.skipped}, unreadable ${report.unreadable}."
+                work.feedback = work.text(R.string.msg_import_result, report.imported, report.skipped, report.unreadable)
             }
         }
     }
@@ -183,21 +218,25 @@ private fun AppContent(app: SteamAppState) {
         if (uri != null && state.unlocked) work.run {
             val value = if (recovery) vault.recoveryAccount()
             else vault.state.value.accounts.firstOrNull { AccountStore.storageId(it) == id }
-            checkNotNull(value) { "The account is no longer available for export." }
+            checkNotNullUi(value) { work.text(R.string.msg_export_unavailable) }
             writeDocument(context.contentResolver, uri, value.toExportJson().toString())
-            work.feedback = "maFile exported."
+            work.feedback = work.text(R.string.msg_export_done)
         }
     }
 
     fun goBack() {
         when {
             bundle != null -> bundle = null
-            page == Page.SYNC -> navigate(Page.SETTINGS)
-            page == Page.LOGIN && account == null -> navigate(Page.ADD)
-            account != null && page != Page.ACCOUNT -> navigate(Page.ACCOUNT)
+            page == Page.LOGIN_RECOVER -> navigate(Page.LOGIN_VERIFY)
+            page == Page.LOGIN_QR || page == Page.LOGIN_VERIFY -> navigate(Page.LOGIN)
+            page == Page.SYNC -> navigate(Page.ME)
+            page == Page.DEVICES -> { selected = null; navigate(Page.ME) }
+            page == Page.ENROLL -> { selected = null; navigate(Page.HOME) }
+            page == Page.LOGIN && transferAfterLogin -> { selected = null; navigate(Page.HOME) }
+            page == Page.FAMILY || page == Page.MARKET || page == Page.REDEEM -> { selected = null; navigate(Page.ME) }
             else -> {
                 selected = null
-                navigate(Page.HOME)
+                navigate(if (isRootPage) Page.HOME else rootPage)
             }
         }
     }
@@ -209,6 +248,7 @@ private fun AppContent(app: SteamAppState) {
         if (!state.unlocked) {
             page = Page.HOME
             selected = null
+            transferAfterLogin = false
         }
         if (state.unlocked && foreground) {
             while (true) {
@@ -217,23 +257,11 @@ private fun AppContent(app: SteamAppState) {
             }
         }
     }
-    LaunchedEffect(state.unlocked, foreground, page, preferences.pollLogins) {
-        if (!state.unlocked || !preferences.pollLogins) pendingLogins = emptySet()
-        if (!state.unlocked || !foreground || page != Page.HOME || !preferences.pollLogins) return@LaunchedEffect
+    LaunchedEffect(state.unlocked, foreground, state.accounts.map(AccountStore::storageId)) {
+        if (!state.unlocked || !foreground) return@LaunchedEffect
         while (true) {
-            val ids = mutableSetOf<Long>()
-            for (row in vault.state.value.accounts) {
-                if (row.steamId <= 0 || row.sharedSecret.isNullOrBlank() || !row.session.hasAccessToken) continue
-                try {
-                    if (services.approval.pendingLoginClientIds(row).isNotEmpty()) ids += AccountStore.storageId(row)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    // Sign-in notices are optional. Account actions handle reauthentication.
-                }
-            }
-            pendingLogins = ids
-            delay(15_000)
+            services.profiles.refreshDue()
+            delay(60_000)
         }
     }
     LaunchedEffect(state.unlocked, foreground, page == Page.SYNC, preferences.autoSync) {
@@ -243,32 +271,37 @@ private fun AppContent(app: SteamAppState) {
             if (page == Page.HOME && !work.busy) work.run {
                 val config = sync.config() ?: return@run
                 val result = sync.sync(config)
-                if (result.conflicts.isNotEmpty()) work.feedback = "Open encrypted sync to resolve account conflicts."
+                if (result.conflicts.isNotEmpty()) work.feedback = work.text(R.string.msg_sync_conflict)
             }
         }
     }
 
     Scaffold(
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        modifier = if (cameraHome || pendingHome) Modifier else Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        containerColor = if (cameraHome) Color.Transparent else MiuixTheme.colorScheme.surface,
         topBar = {
-            TopAppBar(
+            if (!cameraHome && !pendingHome) TopAppBar(
                 scrollBehavior = scrollBehavior,
                 title = when {
-                    !state.unlocked -> "Steam Enhanced"
+                    !state.unlocked -> stringResource(R.string.app_name)
                     bundle != null -> stringResource(R.string.ava_sda_import_action)
                     else -> stringResource(page.title)
+                },
+                actions = {
+                    val scan = loginQrAction
+                    if (state.unlocked && page == Page.LOGIN && bundle == null && scan != null) {
+                        IconButton(onClick = { import.launch(arrayOf("*/*")) }, enabled = !work.busy) {
+                            Icon(MiuixIcons.Import, stringResource(R.string.ava_welcome_import_cta))
+                        }
+                        IconButton(onClick = scan, enabled = !work.busy) {
+                            Icon(MiuixIcons.Scan, stringResource(R.string.ava_login_via_qr))
+                        }
+                    }
                 },
                 navigationIcon = {
                     if (state.unlocked && (!isRootPage || bundle != null)) {
                         IconButton(onClick = ::goBack, enabled = !work.busy) {
                             Icon(MiuixIcons.Back, stringResource(R.string.ava_back))
-                        }
-                    }
-                },
-                actions = {
-                    if (state.unlocked && page == Page.HOME && bundle == null) {
-                        IconButton(onClick = { navigate(Page.ADD) }, enabled = !work.busy) {
-                            Icon(MiuixIcons.Add, stringResource(R.string.ui_add_account))
                         }
                     }
                 },
@@ -281,9 +314,9 @@ private fun AppContent(app: SteamAppState) {
                         selectedContentColor = MiuixTheme.colorScheme.primary,
                     )
                     listOf(
-                        Page.HOME to MiuixIcons.Home,
-                        Page.ADD to MiuixIcons.AddCircle,
-                        Page.SETTINGS to MiuixIcons.Settings,
+                        Page.HOME to MiuixIcons.Lock,
+                        Page.PENDING to MiuixIcons.Tasks,
+                        Page.ME to MiuixIcons.ContactsCircle,
                     ).forEach { (destination, icon) ->
                         NavigationBarItem(
                             selected = page == destination,
@@ -298,7 +331,112 @@ private fun AppContent(app: SteamAppState) {
             }
         },
     ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding).imePadding(), contentAlignment = Alignment.TopCenter) {
+        if (cameraHome) AuthenticatorScannerPage(
+            accounts = state.accounts,
+            account = profileAccount,
+            services = services,
+            work = work,
+            active = foreground,
+            padding = padding,
+            onMyPage = { selected = null; navigate(Page.ME) },
+            onTransfer = {
+                selected = AccountStore.storageId(it)
+                transferAfterLogin = !it.session.hasTokens
+                navigate(if (transferAfterLogin) Page.LOGIN else Page.ENROLL)
+            },
+        ) else if (pendingHome) Box(
+            Modifier.fillMaxSize().padding(padding).imePadding(), contentAlignment = Alignment.TopCenter,
+        ) {
+            if (profileAccount != null && profileAccount.steamId > 0L) {
+                key(AccountStore.storageId(profileAccount)) {
+                    PendingPage(profileAccount, services, work, Modifier.widthIn(max = 660.dp).fillMaxSize())
+                }
+            } else Box(
+                Modifier.fillMaxSize().background(MiuixTheme.colorScheme.windowDimming),
+                contentAlignment = Alignment.Center,
+            ) {
+                Card(
+                    modifier = Modifier.padding(24.dp).widthIn(max = 420.dp),
+                    onClick = if (!work.busy) ({ selected = null; navigate(Page.LOGIN) }) else null,
+                    colors = CardDefaults.defaultColors(color = Color.Black.copy(alpha = 0.55f)),
+                ) {
+                    Column(
+                        Modifier.padding(horizontal = 24.dp, vertical = 20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Icon(MiuixIcons.Info, null, Modifier.size(32.dp), tint = Color.White)
+                        Text(
+                            stringResource(R.string.ui_authenticator_sign_in_prompt),
+                            textAlign = TextAlign.Center,
+                            color = Color.White,
+                        )
+                    }
+                }
+            }
+        } else if (devicesPage) Box(
+            Modifier.fillMaxSize().padding(padding).imePadding(), contentAlignment = Alignment.TopCenter,
+        ) {
+            if (profileAccount != null && profileAccount.steamId > 0L) {
+                key(AccountStore.storageId(profileAccount)) {
+                    DeviceManagementPage(
+                        profileAccount, services, work,
+                        modifier = Modifier.widthIn(max = 660.dp).fillMaxSize(),
+                        scrollBehavior = scrollBehavior,
+                    )
+                }
+            }
+        } else if (state.unlocked && bundle == null && !initializing && page in listOf(Page.ME, Page.FAMILY, Page.MARKET, Page.LOGIN, Page.LOGIN_QR, Page.LOGIN_VERIFY, Page.LOGIN_RECOVER)) Box(
+            Modifier.fillMaxSize().padding(padding).imePadding(), contentAlignment = Alignment.TopCenter,
+        ) {
+            // Keep the live password session through verification and recovery routes.
+            val signInPage = if (page == Page.LOGIN_VERIFY || page == Page.LOGIN_RECOVER) Page.LOGIN else page
+            key(signInPage, if (signInPage == Page.LOGIN || signInPage == Page.LOGIN_QR) selected else profileAccount?.let(AccountStore::storageId)) {
+                when (page) {
+                    Page.LOGIN, Page.LOGIN_QR, Page.LOGIN_VERIFY, Page.LOGIN_RECOVER -> pageStates.SaveableStateProvider("signin:$signInPage:$selected") {
+                        LoginPage(
+                            vault, services, work, account, app.authenticatorRecovery,
+                            modifier = Modifier.widthIn(max = 660.dp).fillMaxSize(),
+                            qrOnly = page == Page.LOGIN_QR,
+                            verificationPage = page == Page.LOGIN_VERIFY,
+                            recoveryPage = page == Page.LOGIN_RECOVER,
+                            onVerificationRequired = { navigate(Page.LOGIN_VERIFY) },
+                            onRecoveryStarted = { navigate(Page.LOGIN_RECOVER) },
+                            onBackToPassword = { navigate(Page.LOGIN) },
+                            onOpenQr = { navigate(Page.LOGIN_QR) },
+                            onQrActionChanged = { loginQrAction = it },
+                        ) {
+                            preferences.useAccount(AccountStore.storageId(it))
+                            selected = AccountStore.storageId(it)
+                            val destination = if (transferAfterLogin && it.sharedSecret.isNullOrBlank()) Page.ENROLL else Page.ME
+                            transferAfterLogin = false
+                            navigate(destination)
+                        }
+                    }
+                    Page.ME -> RefreshableColumn(work, onRefresh = {
+                        profileAccount?.let { services.profiles.refresh(AccountStore.storageId(it), force = true) }
+                    }, scrollBehavior = scrollBehavior) {
+                        MyPage(
+                            state.accounts, profileAccount, vault, preferences, work,
+                            onNavigate = { destination -> selected = profileAccount?.let(AccountStore::storageId); navigate(destination) },
+                            onExport = {
+                                profileAccount?.let { current ->
+                                    exportId = AccountStore.storageId(current)
+                                    val filename = (current.accountName ?: current.steamId.toString()).replace(Regex("[^A-Za-z0-9_.-]"), "_")
+                                    export.launch("$filename.maFile")
+                                }
+                            },
+                            onRemove = { profileAccount?.let { vault.remove(it) }; selected = null },
+                            onAddAccount = { selected = null; navigate(Page.LOGIN) },
+                            onDevices = { selected = null; navigate(Page.DEVICES) },
+                        )
+                    }
+                    Page.FAMILY -> profileAccount?.let { FamilyPage(it, services, work, scrollBehavior, state.accounts) }
+                    Page.MARKET -> profileAccount?.let { MarketPage(it, services, work, scrollBehavior) }
+                    else -> Unit
+                }
+            }
+        } else Box(Modifier.fillMaxSize().padding(padding).imePadding(), contentAlignment = Alignment.TopCenter) {
             pageStates.SaveableStateProvider("${state.unlocked}:$page:$selected:${bundle != null}") {
                 Column(
                     Modifier.widthIn(max = 660.dp).fillMaxWidth()
@@ -313,38 +451,42 @@ private fun AppContent(app: SteamAppState) {
                         initializing -> Panel {
                             Heading(stringResource(R.string.ui_preparing_vault))
                         }
-                        !state.unlocked -> UnlockPanel(vault, state.initialized, work)
+                        !state.unlocked -> UnlockPanel(
+                            vault, state.initialized, work,
+                            requiresDeviceUnlock = deviceUnlock?.enabled == true,
+                            onUnlock = { app.unlockController.unlock(deviceUnlock) },
+                        )
                         incoming != null -> {
                             var password by remember { mutableStateOf("") }
-                            Text("Enter the encryption password used by Steam Desktop Authenticator.")
-                            Field("SDA password", password, secret = true, enabled = !work.busy) { password = it }
-                            Primary("Decrypt and import", password.isNotEmpty() && !work.busy) {
+                            Text(work.text(R.string.msg_import_sda_description))
+                            Field(work.text(R.string.msg_import_sda_password), password, secret = true, enabled = !work.busy) { password = it }
+                            Primary(work.text(R.string.msg_import_decrypt), password.isNotEmpty() && !work.busy) {
                                 work.run {
                                     val report = vault.import(incoming.files, incoming.manifest, password)
                                     if (report.imported == 0 && report.skipped == 0) {
-                                        work.feedback = "No files could be decrypted. Check the password and file selection."
+                                        work.feedback = work.text(R.string.msg_import_no_files)
                                     } else {
                                         bundle = null
-                                        work.feedback = "Imported ${report.imported}, skipped ${report.skipped}, unreadable ${report.unreadable}."
+                                        work.feedback = work.text(R.string.msg_import_result, report.imported, report.skipped, report.unreadable)
                                     }
                                 }
                             }
                         }
                         page == Page.HOME -> {
-                            if (state.unreadable > 0) Text("${state.unreadable} vault entries could not be read.")
+                            if (state.unreadable > 0) Text(work.text(R.string.msg_vault_unreadable_count, state.unreadable))
                             if (state.hasRecovery) Panel {
-                                Heading("Authenticator recovery")
-                                Text("Steam issued a new authenticator that needs to be saved to the vault.")
-                                Primary("Restore authenticator", !work.busy) {
+                                Heading(work.text(R.string.msg_vault_recovery))
+                                Text(work.text(R.string.msg_vault_recovery_description))
+                                Primary(work.text(R.string.msg_vault_restore), !work.busy) {
                                     work.run {
-                                        val recovered = vault.recoveryAccount() ?: error("The recovery entry is unreadable.")
+                                        val recovered = vault.recoveryAccount() ?: throw UiFailure(work.text(R.string.msg_vault_recovery_unreadable))
                                         vault.saveAuthenticator(recovered)
-                                        work.feedback = "Authenticator recovered."
+                                        work.feedback = work.text(R.string.msg_vault_recovered)
                                     }
                                 }
-                                Entry("Export recovery maFile", !work.busy) {
-                                    work.ask("Export recovery maFile?", "This file contains your Steam Guard secrets.", "Choose file", hold = false) {
-                                        checkNotNull(vault.recoveryAccount()) { "The recovery entry is unreadable." }
+                                Entry(work.text(R.string.msg_export_recovery), !work.busy) {
+                                    work.ask(work.text(R.string.msg_export_recovery_question), work.text(R.string.msg_export_secrets), work.text(R.string.msg_choose_file), hold = false) {
+                                        checkNotNullUi(vault.recoveryAccount()) { work.text(R.string.msg_vault_recovery_unreadable) }
                                         exportRecovery = true
                                         export.launch("steam-guard-recovery.maFile")
                                     }
@@ -355,94 +497,69 @@ private fun AppContent(app: SteamAppState) {
                                 Text(stringResource(R.string.ava_getting_started_text))
                                 Entry(stringResource(R.string.ava_sync_done)) { preferences.showGuide(false) }
                             }
-                            state.accounts.filter { AccountStore.storageId(it) in pendingLogins }.forEach {
-                                Entry("Review Steam sign-in for ${it.displayName}", !work.busy) {
-                                    selected = AccountStore.storageId(it)
-                                    navigate(Page.APPROVE)
-                                }
-                            }
                             HomeAccounts(
-                                state.accounts, services.time, work.busy,
-                                onImport = { import.launch(arrayOf("*/*")) },
+                                state.accounts, services.time, work,
                                 onSignIn = { selected = null; navigate(Page.LOGIN) },
                                 onAccount = {
                                     selected = AccountStore.storageId(it)
-                                    navigate(Page.ACCOUNT)
+                                    preferences.useAccount(AccountStore.storageId(it))
+                                    navigate(Page.ME)
+                                },
+                                onTransfer = {
+                                    selected = AccountStore.storageId(it)
+                                    transferAfterLogin = !it.session.hasTokens
+                                    navigate(if (transferAfterLogin) Page.LOGIN else Page.ENROLL)
                                 },
                             )
                         }
-                        page == Page.ADD -> AddAccountPage(
-                            busy = work.busy,
-                            onImport = { import.launch(arrayOf("*/*")) },
-                            onSignIn = { selected = null; navigate(Page.LOGIN) },
-                        )
-                        page == Page.LOGIN -> LoginPage(vault, services, work, account) {
-                            selected = AccountStore.storageId(it)
-                            navigate(Page.ACCOUNT)
-                        }
-                        page == Page.SETTINGS -> SettingsPage(vault, preferences, work, onSync = {
-                            navigate(Page.SYNC)
-                        }, onLock = {
-                            work.run { vault.lock(); selected = null; navigate(Page.HOME) }
-                        })
                         page == Page.SYNC -> SyncPage(vault, preferences, work)
                         account != null -> when (page) {
-                            Page.ACCOUNT -> AccountMenu(account, work, ::navigate, onExport = {
-                                exportId = AccountStore.storageId(account)
-                                val filename = (account.accountName ?: account.steamId.toString())
-                                    .replace(Regex("[^A-Za-z0-9_.-]"), "_")
-                                export.launch("$filename.maFile")
-                            }, onRemove = {
-                                vault.remove(account)
-                                selected = null
-                                navigate(Page.HOME)
-                            }, onRefreshProfile = {
-                                val profile = if (account.session.hasTokens) {
-                                    services.read(AccountStore.storageId(account)) { SteamProfile.refresh(services.api, it) }
-                                } else SteamProfile.refresh(services.api, account)
-                                vault.save(profile)
-                                work.feedback = "Profile refreshed."
-                            })
-                            Page.ENROLL -> EnrollmentPage(account, vault, services, work)
-                            Page.PENDING -> PendingPage(account, services, work)
-                            Page.APPROVE -> ApprovalPage(account, services, work)
-                            Page.DEVICES -> DevicesPage(account, services, work)
-                            Page.FAMILY -> FamilyPage(account, services, work)
-                            Page.MARKET -> MarketPage(account, services, work)
+                            Page.ENROLL -> EnrollmentPage(account, vault, services, work, transferOnly = true)
                             Page.REDEEM -> RedeemPage(account, services, work)
                             else -> Unit
                         }
-                        else -> Entry("Return to accounts") { navigate(Page.HOME) }
+                        else -> Entry(stringResource(R.string.ui_me)) { navigate(Page.ME) }
                     }
                 }
             }
         }
         WorkPrompt(work)
+        AuthenticatorRecoveryDialog(app.authenticatorRecovery, work)
     }
 }
 
 @Composable
-private fun UnlockPanel(vault: AccountVault, initialized: Boolean, work: AppWork) {
+private fun UnlockPanel(
+    vault: AccountVault,
+    initialized: Boolean,
+    work: AppWork,
+    requiresDeviceUnlock: Boolean,
+    onUnlock: suspend () -> Unit,
+) {
     val migration = vault.needsPinMigration()
     var pin by remember { mutableStateOf("") }
     Panel {
-        Heading(if (migration) "Migrate existing vault" else stringResource(R.string.ava_unlock_title))
+        Heading(if (migration) work.text(R.string.msg_vault_migrate_title) else stringResource(R.string.ava_unlock_title))
         if (migration) {
-            Text("Enter your previous PIN once to migrate your accounts. A vault PIN will no longer be required.")
-            Field("Previous vault PIN", pin, secret = true, number = true, enabled = !work.busy) {
+            Text(work.text(R.string.msg_vault_migrate_description))
+            Field(work.text(R.string.msg_vault_previous_pin), pin, secret = true, number = true, enabled = !work.busy) {
                 pin = it.filter { char -> char in '0'..'9' }.take(6)
             }
         }
         Primary(
-            if (migration) "Migrate vault" else if (initialized) "Open vault" else "Create vault",
+            if (migration) work.text(R.string.msg_vault_migrate)
+            else if (requiresDeviceUnlock) stringResource(R.string.ava_unlock_with_biometric)
+            else if (initialized) work.text(R.string.msg_vault_open) else work.text(R.string.msg_vault_create),
             !work.busy && (!migration || pin.length == 6),
         ) {
             work.run {
-                if (migration) vault.migratePin(pin) else vault.open()
+                if (migration) vault.migratePin(pin) else onUnlock()
                 pin = ""
             }
         }
-        if (initialized) DeviceUnlockButton(vault, work)
+        if (migration && requiresDeviceUnlock) Entry(stringResource(R.string.ava_unlock_with_biometric), !work.busy) {
+            work.run { onUnlock() }
+        }
     }
 }
 
@@ -450,17 +567,17 @@ private fun UnlockPanel(vault: AccountVault, initialized: Boolean, work: AppWork
 private fun HomeAccounts(
     accounts: List<SteamGuardAccount>,
     steamTime: SteamTime,
-    busy: Boolean,
-    onImport: () -> Unit,
+    work: AppWork,
     onSignIn: () -> Unit,
     onAccount: (SteamGuardAccount) -> Unit,
+    onTransfer: (SteamGuardAccount) -> Unit,
 ) {
+    val busy = work.busy
     if (accounts.isEmpty()) {
         Panel {
             Heading(stringResource(R.string.ava_first_account))
             Text(stringResource(R.string.ava_first_account_text), color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
             Primary(stringResource(R.string.ava_login_button), !busy, onSignIn)
-            Entry(stringResource(R.string.ava_welcome_import_cta), !busy, onImport)
         }
     }
     var now by remember { mutableStateOf(steamTime.currentSteamTime()) }
@@ -471,25 +588,7 @@ private fun HomeAccounts(
         }
     }
     for (account in accounts) key(AccountStore.storageId(account)) {
-        AccountCode(account, now, busy, onAccount)
-    }
-}
-
-@Composable
-private fun AddAccountPage(busy: Boolean, onImport: () -> Unit, onSignIn: () -> Unit) {
-    Panel {
-        ArrowPreference(
-            title = stringResource(R.string.ava_login_button),
-            summary = stringResource(R.string.ui_sign_in_summary),
-            enabled = !busy,
-            onClick = onSignIn,
-        )
-        ArrowPreference(
-            title = stringResource(R.string.ava_welcome_import_cta),
-            summary = stringResource(R.string.ava_sda_selection),
-            enabled = !busy,
-            onClick = onImport,
-        )
+        AccountCode(account, now, steamTime, work, onAccount, onTransfer)
     }
 }
 
@@ -497,9 +596,12 @@ private fun AddAccountPage(busy: Boolean, onImport: () -> Unit, onSignIn: () -> 
 private fun AccountCode(
     account: SteamGuardAccount,
     time: Long,
-    busy: Boolean,
+    steamTime: SteamTime,
+    work: AppWork,
     onAccount: (SteamGuardAccount) -> Unit,
+    onTransfer: (SteamGuardAccount) -> Unit,
 ) {
+    val busy = work.busy
     val context = LocalContext.current
     val code = remember(account.sharedSecret, time / 30) {
         if (account.sharedSecret.isNullOrBlank()) null else runCatching { account.generateCode(time) }.getOrNull()
@@ -515,7 +617,7 @@ private fun AccountCode(
         }
         if (code != null) {
             Row(
-                Modifier.fillMaxWidth().clickable(enabled = !busy, onClickLabel = "Copy Steam Guard code") {
+                Modifier.fillMaxWidth().clickable(enabled = !busy, onClickLabel = work.text(R.string.msg_copy_guard_code)) {
                     context.copySensitive("Steam Guard", code)
                 }.padding(vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -524,52 +626,20 @@ private fun AccountCode(
                 Text(code, color = MiuixTheme.colorScheme.primary, style = MiuixTheme.textStyles.title1.copy(
                     fontFamily = FontFamily.Monospace, letterSpacing = 4.sp, fontSize = 34.sp,
                 ))
-                Text("${seconds}s")
+                Text(work.text(R.string.msg_guard_seconds, seconds))
             }
-            LinearProgressIndicator(Modifier.fillMaxWidth(), progress = seconds / 30f)
+            SteamCodeProgress(steamTime)
+        } else if (account.steamId > 0L) {
+            Primary(stringResource(R.string.ui_transfer_to_app), !busy) { onTransfer(account) }
         } else {
-            Text("Set up Steam Guard to show a code.")
+            Text(work.text(R.string.msg_enroll_required))
         }
     }
 }
 
 internal val SteamGuardAccount.displayName: String
     get() = personaName?.takeIf(String::isNotBlank) ?: accountName?.takeIf(String::isNotBlank)
-        ?: steamId.takeIf { it > 0L }?.toString() ?: "Code-only account"
+        ?: steamId.takeIf { it > 0L }?.toString() ?: "Steam Guard"
 
-@Composable
-private fun AccountMenu(
-    account: SteamGuardAccount,
-    work: AppWork,
-    navigate: (Page) -> Unit,
-    onExport: () -> Unit,
-    onRemove: suspend () -> Unit,
-    onRefreshProfile: suspend () -> Unit,
-) {
-    Panel {
-        SteamAvatar(account, animated = true)
-        Heading(account.displayName)
-        Text(if (account.steamId > 0) "SteamID ${account.steamId}" else "Offline codes")
-        Entry(stringResource(R.string.ava_action_login), !work.busy) { navigate(Page.LOGIN) }
-        if (account.steamId > 0) {
-            Entry("Refresh Steam profile", !work.busy) { work.run(onRefreshProfile) }
-            Entry(stringResource(R.string.ava_add_auth_title), !work.busy) { navigate(Page.ENROLL) }
-            Entry(stringResource(R.string.ava_pending_title), !work.busy) { navigate(Page.PENDING) }
-            Entry(stringResource(R.string.ava_action_login_requests), !work.busy) { navigate(Page.APPROVE) }
-            Entry(stringResource(R.string.ava_device_sessions_title), !work.busy) { navigate(Page.DEVICES) }
-            Entry(stringResource(R.string.ava_fam_account_action), !work.busy) { navigate(Page.FAMILY) }
-            Entry(stringResource(R.string.ava_action_market), !work.busy) { navigate(Page.MARKET) }
-            Entry(stringResource(R.string.ava_key_redeem_action), !work.busy) { navigate(Page.REDEEM) }
-        }
-    }
-    Panel {
-        Entry(stringResource(R.string.ava_action_export), account.sharedSecret != null && !work.busy) {
-            work.ask("Export authenticator?", "The exported file contains secrets. Save it somewhere private.", "Choose file", hold = false) {
-                onExport()
-            }
-        }
-        Entry(stringResource(R.string.ava_action_remove), !work.busy) {
-            work.ask("Remove ${account.displayName}?", "This removes the local copy. Steam Guard remains active on Steam.", "Remove", block = onRemove)
-        }
-    }
-}
+internal val SteamGuardAccount.username: String
+    get() = accountName?.takeIf(String::isNotBlank) ?: "—"

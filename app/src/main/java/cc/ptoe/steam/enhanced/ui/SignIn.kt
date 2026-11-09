@@ -2,24 +2,55 @@ package cc.ptoe.steam.enhanced.ui
 
 import androidx.compose.ui.res.stringResource
 import cc.ptoe.steam.enhanced.R
+import cc.ptoe.steam.enhanced.core.dlog
+import cc.ptoe.steam.enhanced.core.protocol.EResult
+import cc.ptoe.steam.enhanced.net.SteamApiException
+import java.io.IOException
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.text.style.TextAlign
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.unit.dp
+import cc.ptoe.steam.enhanced.app.AuthenticatorRecoveryStore
+import cc.ptoe.steam.enhanced.protocol.AuthenticatorRecovery
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.job
 import cc.ptoe.steam.enhanced.app.AccountVault
 import cc.ptoe.steam.enhanced.app.SteamServices
 import cc.ptoe.steam.enhanced.core.model.SteamGuardAccount
@@ -49,38 +80,136 @@ internal fun LoginPage(
     services: SteamServices,
     work: AppWork,
     previous: SteamGuardAccount?,
+    recoveryStore: AuthenticatorRecoveryStore,
+    modifier: Modifier = Modifier,
+    qrOnly: Boolean = false,
+    verificationPage: Boolean = false,
+    recoveryPage: Boolean = false,
+    onVerificationRequired: () -> Unit = {},
+    onRecoveryStarted: () -> Unit = {},
+    onBackToPassword: () -> Unit = {},
+    onOpenQr: () -> Unit = {},
+    onQrActionChanged: ((() -> Unit)?) -> Unit = {},
     onSignedIn: (SteamGuardAccount) -> Unit,
 ) {
-    var username by remember { mutableStateOf(previous?.accountName.orEmpty()) }
+    val resources by rememberUpdatedState(LocalResources.current)
+    val pendingRecovery by recoveryStore.pending.collectAsState()
+    val vaultState by vault.state.collectAsState()
+    var username by rememberSaveable { mutableStateOf(previous?.accountName.orEmpty()) }
     var password by remember { mutableStateOf("") }
-    var rememberPassword by remember { mutableStateOf(previous?.password != null) }
+    var rememberPassword by rememberSaveable { mutableStateOf(previous?.password != null) }
     var session by remember { mutableStateOf<SteamAuthSession?>(null) }
     var qr by remember { mutableStateOf<String?>(null) }
     var polling by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf("") }
     var method by remember { mutableStateOf<GuardType?>(null) }
     var loginPassword by remember { mutableStateOf<String?>(null) }
+    var recovery by remember { mutableStateOf<AuthenticatorRecovery?>(null) }
+    var recovered by remember { mutableStateOf<SteamGuardAccount?>(null) }
+    var transferCode by remember { mutableStateOf("") }
+    var pollJob by remember { mutableStateOf<Job?>(null) }
+    val context = LocalContext.current
+
+    fun reportFailure(failure: Exception) {
+        work.feedback = work.errorMessage(failure)
+    }
+
+    suspend fun attemptSignIn(block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            reportFailure(failure)
+        }
+    }
+
+    fun signIn(block: suspend () -> Unit) {
+        work.run { attemptSignIn(block) }
+    }
+
+    fun startQrLogin() {
+        signIn {
+            val next = services.newAuthSession()
+            qr = next.beginWithQr()
+            session = next
+            polling = true
+        }
+    }
+
+    fun recoverAuthenticator(current: SteamAuthSession) {
+        work.ask(
+            resources.getString(R.string.ui_recovery_start_title),
+            resources.getString(R.string.ui_recovery_start_summary),
+            resources.getString(R.string.ui_recovery_send_code), hold = false,
+        ) {
+            attemptSignIn {
+                polling = false
+                pollJob?.cancelAndJoin()
+                checkUi(previous == null || previous.steamId == current.steamId ||
+                    previous.steamId == 0L && previous.accountName?.equals(username.trim(), ignoreCase = true) == true) {
+                    work.text(R.string.msg_login_wrong_account)
+                }
+                val next = current.newAuthenticatorRecovery()
+                checkUi(next.start() == LinkResult.CHALLENGE_EMAIL_SENT) { resources.getString(R.string.ava_login_failed, "Steam") }
+                recovery = next
+                transferCode = ""
+                onRecoveryStarted()
+            }
+        }
+    }
+
+    LaunchedEffect(verificationPage, recoveryPage) {
+        if (qrOnly) return@LaunchedEffect
+        if (verificationPage || recoveryPage) {
+            if (session == null) onBackToPassword()
+            else if (verificationPage && recovery != null && recovered == null) {
+                recovery = null
+                transferCode = ""
+                polling = session?.acceptsApproval == true
+            }
+        } else if (session != null) {
+            polling = false
+            pollJob?.cancelAndJoin()
+            session = null
+            method = null
+            code = ""
+            loginPassword = null
+            recovery = null
+            recovered = null
+            transferCode = ""
+        }
+    }
+
+    DisposableEffect(session, qrOnly, verificationPage, recoveryPage) {
+        onQrActionChanged(if (!qrOnly && !verificationPage && !recoveryPage && session == null) onOpenQr else null)
+        onDispose { onQrActionChanged(null) }
+    }
+    LaunchedEffect(qrOnly) {
+        if (qrOnly) startQrLogin()
+    }
 
     LaunchedEffect(session, polling) {
         val current = session ?: return@LaunchedEffect
         if (!polling) return@LaunchedEffect
+        pollJob = currentCoroutineContext().job
         try {
             repeat(75) {
                 val response = current.poll()
                 qr = response.newChallengeUrl ?: qr
                 if (response.complete) {
                     val tokens = current.toSessionData(response)
-                    check(tokens.steamId > 0L) { "Steam did not return an account ID." }
+                    checkUi(tokens.steamId > 0L) { work.text(R.string.msg_login_no_id) }
                     val name = response.accountName?.takeIf { it.isNotBlank() } ?: username.trim()
                     if (previous != null) {
-                        check(previous.steamId == tokens.steamId ||
+                        checkUi(previous.steamId == tokens.steamId ||
                             previous.steamId == 0L && !previous.accountName.isNullOrBlank() &&
                             previous.accountName.equals(name, ignoreCase = true)) {
-                            "The signed-in Steam account does not match this maFile."
+                            work.text(R.string.msg_login_wrong_account)
                         }
                     }
                     val existing = vault.state.value.accounts.firstOrNull { it.steamId == tokens.steamId }
-                    val base = if (previous?.steamId == 0L && existing?.sharedSecret != null) existing
+                    val base = if (!existing?.sharedSecret.isNullOrBlank()) checkNotNullUi(existing)
                         else previous ?: existing ?: SteamGuardAccount()
                     val updated = base.copy(
                         session = tokens.copy(extra = base.session.extra),
@@ -93,106 +222,219 @@ internal fun LoginPage(
                     }
                     password = ""
                     loginPassword = null
-                    onSignedIn(updated)
+                    val signedIn = try {
+                        services.profiles.refresh(AccountStore.storageId(updated), force = true) ?: updated
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        // The authenticated account is already persisted. Profile
+                        // metadata must not turn a successful login into a failure.
+                        dlog("Profile refresh after sign-in failed: ${failure.javaClass.simpleName}")
+                        updated
+                    }
+                    onSignedIn(signedIn)
                     return@LaunchedEffect
                 }
                 delay(2_400)
             }
-            work.feedback = "Sign-in timed out. Start a new Steam session."
+            work.feedback = work.text(R.string.msg_login_timeout)
         } catch (failure: kotlinx.coroutines.CancellationException) {
             throw failure
         } catch (failure: Exception) {
-            work.feedback = if (failure is IllegalStateException) failure.message
-                else "Steam sign-in failed. Start a new session."
+            reportFailure(failure)
         } finally {
             polling = false
         }
     }
 
-    Panel {
-        val current = session
-        if (current == null) {
-            Heading("Steam account")
-            Field(stringResource(R.string.ava_login_username), username, enabled = !work.busy) { username = it }
-            Field(stringResource(R.string.ava_login_password), password, secret = true, enabled = !work.busy) { password = it }
-            SwitchPreference(
-                checked = rememberPassword,
-                onCheckedChange = { rememberPassword = it },
-                title = "Store password for automatic sign-in",
-                summary = "Stored only in the encrypted local vault.",
-                enabled = !work.busy,
-            )
-            Primary(stringResource(R.string.ava_login_via_credentials), username.isNotBlank() && password.isNotBlank() && !work.busy) {
-                work.run {
-                    val next = SteamAuthSession(services.api)
-                    next.beginWithCredentials(username.trim(), password)
-                    loginPassword = password.takeIf { rememberPassword }
-                    password = ""
-                    method = next.allowedConfirmations.firstOrNull { it == GuardType.DEVICE_CODE || it == GuardType.EMAIL_CODE }
-                    session = next
-                    polling = method == null
-                }
-            }
-            Entry(stringResource(R.string.ava_login_via_qr), !work.busy) {
-                work.run {
-                    val next = SteamAuthSession(services.api)
-                    qr = next.beginWithQr()
-                    session = next
-                    polling = true
-                }
-            }
-        } else {
-            val challenge = qr
-            val guard = method
-            if (challenge != null) {
-                Heading(stringResource(R.string.ava_login_scan_with_app))
-                val image = remember(challenge) { qrBitmap(challenge).asImageBitmap() }
-                Image(image, "Steam sign-in QR code", Modifier.fillMaxWidth().heightIn(max = 320.dp))
-            } else if (guard != null && !polling) {
-                Heading(if (guard == GuardType.EMAIL_CODE) "Email verification" else "Steam Guard verification")
-                Field("Verification code", code, enabled = !work.busy) { code = it.take(12) }
-                Primary(stringResource(R.string.ava_login_submit_code), code.isNotBlank() && !work.busy) {
-                    work.run {
-                        current.submitSteamGuardCode(code.trim().uppercase(), guard)
-                        code = ""
-                        polling = true
-                    }
-                }
-                if (guard == GuardType.DEVICE_CODE && previous?.sharedSecret != null) {
-                    Entry("Use this account's current code", !work.busy) {
-                        work.run {
-                            if (!services.time.isAligned) services.time.align()
-                            current.submitSteamGuardCode(previous.generateCode(services.time.currentSteamTime()), guard)
-                            polling = true
+    Box(modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            if (work.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            work.feedback?.let { Text(it) }
+            Panel {
+                val current = session
+                if (qrOnly && current == null) {
+                    if (work.busy) Text(stringResource(R.string.ui_loading_login_qr))
+                    else Primary(stringResource(R.string.ui_retry), onClick = ::startQrLogin)
+                } else if (!qrOnly && !verificationPage && current == null) {
+                    Field(stringResource(R.string.ava_login_username), username, enabled = !work.busy) { username = it }
+                    Field(stringResource(R.string.ava_login_password), password, secret = true, enabled = !work.busy) { password = it }
+                    SwitchPreference(
+                        checked = rememberPassword,
+                        onCheckedChange = { rememberPassword = it },
+                        title = work.text(R.string.msg_login_save_password),
+                        enabled = !work.busy,
+                    )
+                    Primary(stringResource(R.string.ava_login_button), username.isNotBlank() && password.isNotBlank() && !work.busy) {
+                        signIn {
+                            val next = services.newAuthSession()
+                            next.beginWithCredentials(username.trim(), password)
+                            loginPassword = password.takeIf { rememberPassword }
+                            password = ""
+                            method = next.allowedConfirmations.firstOrNull { it == GuardType.DEVICE_CODE || it == GuardType.EMAIL_CODE }
+                            session = next
+                            polling = method == null || next.acceptsApproval
+                            if (method != null || next.acceptsApproval) onVerificationRequired()
+                            val stored = vault.state.value.accounts.firstOrNull { it.steamId == next.steamId } ?: previous
+                            if (method == GuardType.DEVICE_CODE && !stored?.sharedSecret.isNullOrBlank()) {
+                                if (!services.time.isAligned) services.time.align()
+                                next.submitSteamGuardCode(
+                                    checkNotNullUi(stored).generateCode(services.time.currentSteamTime()), GuardType.DEVICE_CODE,
+                                )
+                                polling = true
+                            }
                         }
                     }
-                }
-                for (other in current.allowedConfirmations.filter { it != guard }) {
-                    when (other) {
-                        GuardType.EMAIL_CODE, GuardType.DEVICE_CODE -> Entry(
-                            if (other == GuardType.EMAIL_CODE) "Use email code" else "Use Steam Guard code", !work.busy,
-                        ) { code = ""; method = other }
-                        GuardType.DEVICE_CONFIRMATION, GuardType.EMAIL_CONFIRMATION ->
-                            Entry("Wait for approval", !work.busy) { polling = true }
-                        else -> Unit
+
+                } else if (current != null) {
+                    val challenge = qr
+                    val guard = method
+                    val replacement = recovered
+                    val transfer = recovery
+                    if (verificationPage && replacement == null && transfer == null && current.canRecoverAuthenticator) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            val linkBlue = if (MiuixTheme.colorScheme.surface.luminance() < 0.5f) Color(0xFF7AB1FF) else Color(0xFF0062CC)
+                            TextButton(
+                                stringResource(R.string.ui_recovery_start_title),
+                                onClick = { recoverAuthenticator(current) },
+                                enabled = !work.busy,
+                                colors = ButtonDefaults.textButtonColors(color = Color.Transparent, textColor = linkBlue),
+                            )
+                        }
                     }
+                    if (replacement != null) {
+                        Text(stringResource(R.string.ui_recovery_ready))
+                        replacement.revocationCode?.let { recoveryCode ->
+                            Entry(stringResource(R.string.ui_recovery_copy_code), !work.busy) {
+                                context.copySensitive(work.text(R.string.ui_recovery_copy_code), recoveryCode)
+                            }
+                        }
+                        Primary(stringResource(R.string.ui_recovery_continue), !work.busy && pendingRecovery == null) {
+                            signIn {
+                                val saved = vault.state.value.accounts.firstOrNull { it.steamId == replacement.steamId }
+                                checkUi(saved?.sharedSecret == replacement.sharedSecret) { resources.getString(R.string.ui_recovery_save_failed) }
+                                if (!services.time.isAligned) services.time.align()
+                                current.submitSteamGuardCode(replacement.generateCode(services.time.currentSteamTime()), GuardType.DEVICE_CODE)
+                                polling = true
+                            }
+                        }
+                    } else if (transfer != null) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            val linkBlue = if (MiuixTheme.colorScheme.surface.luminance() < 0.5f) Color(0xFF7AB1FF) else Color(0xFF0062CC)
+                            TextButton(
+                                stringResource(R.string.ui_recovery_resend),
+                                onClick = {
+                                    signIn { checkUi(transfer.start() == LinkResult.CHALLENGE_EMAIL_SENT) { resources.getString(R.string.ava_login_failed, "Steam") } }
+                                },
+                                enabled = !work.busy,
+                                colors = ButtonDefaults.textButtonColors(color = Color.Transparent, textColor = linkBlue),
+                            )
+                        }
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            SteamApprovalAnimation()
+                        }
+                        Text(
+                            stringResource(R.string.ui_recovery_sms_prompt),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                            textAlign = TextAlign.Center,
+                        )
+                        Field(stringResource(R.string.ui_recovery_code), transferCode, enabled = !work.busy) { transferCode = it.take(16) }
+                        Primary(stringResource(R.string.ui_transfer_to_app), transferCode.isNotBlank() && !work.busy) {
+                            work.ask(
+                                resources.getString(R.string.ui_recovery_replace_title),
+                                resources.getString(R.string.ui_recovery_replace_summary),
+                                resources.getString(R.string.msg_transfer),
+                            ) {
+                                attemptSignIn {
+                                    try {
+                                        recovered = recoveryStore.finish(transfer, transferCode.trim(), username.trim(), loginPassword)
+                                    } finally {
+                                        // A failed disk write still retains the already-active
+                                        // replacement in the ViewModel and global rescue dialog.
+                                        recoveryStore.pending.value?.let { recovered = it }
+                                        if (recovered != null) transferCode = ""
+                                    }
+                                }
+                            }
+                        }
+                    } else if (challenge != null) {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            SteamScanAnimation()
+                        }
+                        Text(
+                            stringResource(R.string.ava_login_scan_with_app),
+                            modifier = Modifier.fillMaxWidth(),
+                            style = MiuixTheme.textStyles.body2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            textAlign = TextAlign.Center,
+                        )
+                        val image = remember(challenge) { qrBitmap(challenge).asImageBitmap() }
+                        Image(image, work.text(R.string.msg_login_qr_description), Modifier.fillMaxWidth().heightIn(max = 320.dp))
+                    } else if (!verificationPage) {
+                        Text(stringResource(R.string.ava_login_waiting), Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+                    } else {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            SteamApprovalAnimation()
+                        }
+                        Text(
+                            stringResource(if (guard == GuardType.EMAIL_CODE && !current.acceptsApproval) R.string.ui_two_factor_email_prompt else R.string.ui_two_factor_prompt),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                            textAlign = TextAlign.Center,
+                        )
+                        if (guard != null) {
+                            Field(work.text(R.string.msg_login_code), code, enabled = !work.busy) { code = it.take(12) }
+                            Primary(stringResource(R.string.ava_login_submit_code), code.isNotBlank() && !work.busy) {
+                                signIn {
+                                    current.submitSteamGuardCode(code.trim().uppercase(), guard)
+                                    code = ""
+                                    polling = true
+                                }
+                            }
+                            val localAuthenticator = vaultState.accounts.firstOrNull { it.steamId == current.steamId } ?: previous
+                            if (guard == GuardType.DEVICE_CODE && !localAuthenticator?.sharedSecret.isNullOrBlank()) {
+                                Entry(work.text(R.string.msg_login_use_current_code), !work.busy) {
+                                    signIn {
+                                        if (!services.time.isAligned) services.time.align()
+                                        current.submitSteamGuardCode(checkNotNullUi(localAuthenticator).generateCode(services.time.currentSteamTime()), guard)
+                                        polling = true
+                                    }
+                                }
+                            }
+                            for (other in current.allowedConfirmations.filter { it != guard }) {
+                                when (other) {
+                                    GuardType.EMAIL_CODE, GuardType.DEVICE_CODE -> Entry(
+                                        if (other == GuardType.EMAIL_CODE) work.text(R.string.msg_login_use_email) else work.text(R.string.msg_login_use_guard), !work.busy,
+                                    ) { code = ""; method = other }
+                                    else -> Unit
+                                }
+                            }
+                        }
+                    }
+                    if (polling && (verificationPage || qrOnly)) Text(
+                        stringResource(R.string.ava_login_waiting), Modifier.fillMaxWidth(),
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary, textAlign = TextAlign.Center,
+                    )
+                    if (!polling && guard == null && recovery == null && recovered == null) Primary(work.text(R.string.msg_login_check_again), !work.busy) { polling = true }
+
                 }
-            }
-            if (polling) Text(stringResource(R.string.ava_login_waiting))
-            if (!polling && guard == null) Primary("Check again", !work.busy) { polling = true }
-            Entry("Start over", !work.busy) {
-                session = null
-                qr = null
-                code = ""
-                loginPassword = null
-                work.feedback = null
             }
         }
+
     }
 }
 
 @Composable
-internal fun EnrollmentPage(account: SteamGuardAccount, vault: AccountVault, services: SteamServices, work: AppWork) {
+internal fun EnrollmentPage(
+    account: SteamGuardAccount,
+    vault: AccountVault,
+    services: SteamServices,
+    work: AppWork,
+    transferOnly: Boolean = false,
+) {
     val context = LocalContext.current
     val id = AccountStore.storageId(account)
     var linker by remember { mutableStateOf<AuthenticatorLinker?>(null) }
@@ -228,15 +470,15 @@ internal fun EnrollmentPage(account: SteamGuardAccount, vault: AccountVault, ser
             LinkResult.MUST_CONFIRM_EMAIL -> stage = "email"
             LinkResult.AUTHENTICATOR_PRESENT -> {
                 stage = "choose"
-                work.feedback = "This account already has an authenticator. Use Transfer existing authenticator."
+                work.feedback = work.text(R.string.msg_enroll_already_present)
             }
             LinkResult.AWAITING_FINALIZATION -> {
-                val pending = checkNotNull(link.linkedAccount)
+                val pending = checkNotNullUi(link.linkedAccount)
                 stage = "activate"
                 input = ""
                 persist(pending)
             }
-            else -> error(result.name.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() })
+            else -> throw UiFailure(work.text(linkResultLabel(result)))
         }
     }
 
@@ -244,82 +486,82 @@ internal fun EnrollmentPage(account: SteamGuardAccount, vault: AccountVault, ser
         Heading(account.displayName)
         val unsaved = recovery
         if (unsaved != null) {
-            Text("Steam returned an authenticator that could not be saved. Keep a recovery copy before leaving.")
-            Entry("Copy recovery maFile", !work.busy) {
-                context.copySensitive("Steam Guard recovery", unsaved.toExportJson().toString())
+            Text(work.text(R.string.ui_recovery_save_failed))
+            Entry(work.text(R.string.ui_recovery_copy_file), !work.busy) {
+                context.copySensitive(work.text(R.string.ui_recovery_copy_file), unsaved.toExportJson().toString())
             }
-            Primary("Retry local save", !work.busy) { work.run { persist(unsaved) } }
+            Primary(work.text(R.string.ui_recovery_retry_save), !work.busy) { work.run { persist(unsaved) } }
         } else when (stage) {
             "choose" -> {
-                Primary(stringResource(R.string.ava_welcome_login_sub), !work.busy) {
-                    work.ask("Set up Steam Guard?", "Steam may ask for a phone number or send a verification code.", "Continue") {
+                if (!transferOnly) Primary(stringResource(R.string.ava_welcome_login_sub), !work.busy) {
+                    work.ask(work.text(R.string.msg_enroll_setup_question), work.text(R.string.msg_enroll_setup_description), work.text(R.string.msg_continue)) {
                         withContext(NonCancellable) { startAdd() }
                     }
                 }
-                Entry("Transfer existing authenticator", !work.busy) {
-                    work.ask("Transfer Steam Guard?", "Steam will email a transfer code. Entering that code later replaces the existing authenticator.", "Send email", hold = false) {
+                Entry(work.text(R.string.msg_enroll_transfer_existing), !work.busy) {
+                    work.ask(work.text(R.string.msg_enroll_transfer_question), work.text(R.string.msg_enroll_transfer_description), work.text(R.string.msg_enroll_send_email), hold = false) {
                         val result = activeLinker().moveInStart()
-                        check(result == LinkResult.CHALLENGE_EMAIL_SENT) { result.name }
+                        checkUi(result == LinkResult.CHALLENGE_EMAIL_SENT) { work.text(linkResultLabel(result)) }
                         stage = "move"
                         input = ""
                     }
                 }
             }
             "phone" -> {
-                Field("Phone number with country code", input, enabled = !work.busy) { input = it }
-                Field("Country code (optional)", country, enabled = !work.busy) { country = it.take(2) }
-                Primary("Add phone number", input.isNotBlank() && !work.busy) {
+                Field(work.text(R.string.msg_enroll_phone), input, enabled = !work.busy) { input = it }
+                Field(work.text(R.string.msg_enroll_country), country, enabled = !work.busy) { country = it.take(2) }
+                Primary(work.text(R.string.msg_enroll_add_phone), input.isNotBlank() && !work.busy) {
                     work.run { withContext(NonCancellable) { startAdd(input.trim()) } }
                 }
             }
             "email" -> {
-                Text("Open the email from Steam and confirm the phone number.")
-                Primary("Continue after confirmation", !work.busy) {
+                Text(work.text(R.string.msg_enroll_confirm_phone))
+                Primary(work.text(R.string.msg_enroll_continue_confirmed), !work.busy) {
                     work.run { withContext(NonCancellable) { startAdd() } }
                 }
             }
             "activate" -> {
-                Text("Enter the activation code Steam sent by SMS or email.")
+                Text(work.text(R.string.msg_enroll_activation_prompt))
                 if (linker == null) SwitchPreference(
                     checked = country == "EMAIL", onCheckedChange = { country = if (it) "EMAIL" else "" },
-                    title = "Code was sent by email",
+                    title = work.text(R.string.msg_enroll_email_sent),
                 )
-                Field("Activation code", input, enabled = !work.busy) { input = it.take(16) }
-                Primary("Activate authenticator", input.isNotBlank() && !work.busy) {
+                Field(work.text(R.string.msg_enroll_activation_code), input, enabled = !work.busy) { input = it.take(16) }
+                Primary(work.text(R.string.msg_enroll_activate), input.isNotBlank() && !work.busy) {
                     work.run {
                         withContext(NonCancellable) {
                             val link = activeLinker()
                             if (link.linkedAccount == null) link.resumeActivation(account, country == "EMAIL")
                             val result = link.finalize(input.trim())
-                            check(result == FinalizeResult.SUCCESS) { result.name.replace('_', ' ') }
+                            checkUi(result == FinalizeResult.SUCCESS) { work.text(finalizeResultLabel(result)) }
                             stage = "complete"
-                            persist(checkNotNull(link.linkedAccount).copy(fullyEnrolled = true))
+                            persist(checkNotNullUi(link.linkedAccount).copy(fullyEnrolled = true))
                             input = ""
                         }
                     }
                 }
             }
             "move" -> {
-                Text("Enter the code from Steam's transfer email.")
-                Field("Transfer code", input, enabled = !work.busy) { input = it.take(16) }
-                Primary("Transfer authenticator", input.isNotBlank() && !work.busy) {
-                    work.ask("Replace the old authenticator?", "The old device and recovery code will stop working as soon as Steam accepts this code.", "Transfer") {
+                Text(work.text(R.string.msg_enroll_transfer_prompt))
+                Field(work.text(R.string.msg_enroll_transfer_code), input, enabled = !work.busy) { input = it.take(16) }
+                Primary(work.text(R.string.msg_enroll_transfer), input.isNotBlank() && !work.busy) {
+                    work.ask(work.text(R.string.ui_recovery_replace_title), work.text(R.string.msg_enroll_replace_warning), work.text(R.string.msg_transfer)) {
                         withContext(NonCancellable) {
                             val link = activeLinker()
                             val result = link.moveInContinue(input.trim())
-                            check(result == LinkResult.MOVED_IN) { result.name.replace('_', ' ') }
+                            checkUi(result == LinkResult.MOVED_IN) { work.text(linkResultLabel(result)) }
                             stage = "complete"
-                            persist(checkNotNull(link.linkedAccount))
+                            persist(checkNotNullUi(link.linkedAccount))
                             input = ""
                         }
                     }
                 }
             }
             "complete" -> {
-                Heading("Authenticator ready")
-                Text("Save the recovery code somewhere safe.")
+                Heading(work.text(R.string.msg_enroll_ready))
+                Text(work.text(R.string.msg_enroll_save_code))
                 account.revocationCode?.let { recoveryCode ->
-                    Entry("Copy recovery code", !work.busy) { context.copySensitive("Steam recovery", recoveryCode) }
+                    Entry(work.text(R.string.ui_recovery_copy_code), !work.busy) { context.copySensitive(work.text(R.string.ui_recovery_copy_code), recoveryCode) }
                 }
             }
         }
@@ -334,13 +576,13 @@ internal fun QrInputButtons(enabled: Boolean, work: AppWork, onDecoded: (String)
             val decoded = withContext(Dispatchers.IO) {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-                require(bounds.outWidth > 0 && bounds.outHeight > 0) { "The image could not be read." }
+                requireUi(bounds.outWidth > 0 && bounds.outHeight > 0) { work.text(R.string.msg_image_unreadable) }
                 var sample = 1
                 while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 1600) sample *= 2
                 val bitmap = resolver.openInputStream(uri)?.use {
                     BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
-                } ?: error("The image could not be read.")
-                try { decodeQr(bitmap) } finally { bitmap.recycle() }
+                } ?: throw UiFailure(work.text(R.string.msg_image_unreadable))
+                try { decodeQr(bitmap, work) } finally { bitmap.recycle() }
             }
             onDecoded(decoded)
         }
@@ -348,20 +590,20 @@ internal fun QrInputButtons(enabled: Boolean, work: AppWork, onDecoded: (String)
     val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
         if (bitmap != null) work.run {
             try {
-                onDecoded(withContext(Dispatchers.Default) { decodeQr(bitmap) })
+                onDecoded(withContext(Dispatchers.Default) { decodeQr(bitmap, work) })
             } finally {
                 bitmap.recycle()
             }
         }
     }
-    Entry("Scan with camera", enabled) {
+    Entry(work.text(R.string.msg_scan_camera), enabled) {
         try {
             camera.launch(null)
         } catch (_: android.content.ActivityNotFoundException) {
-            work.feedback = "No camera app is available. Open a QR image instead."
+            work.feedback = work.text(R.string.msg_scan_no_camera)
         }
     }
-    Entry("Open QR image", enabled) { image.launch(arrayOf("image/*")) }
+    Entry(work.text(R.string.msg_scan_image), enabled) { image.launch(arrayOf("image/*")) }
 }
 
 private fun qrBitmap(text: String): Bitmap {
@@ -373,7 +615,7 @@ private fun qrBitmap(text: String): Bitmap {
     return Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888)
 }
 
-private fun decodeQr(bitmap: Bitmap): String {
+private fun decodeQr(bitmap: Bitmap, work: AppWork): String {
     val width = bitmap.width
     val height = bitmap.height
     val pixels = IntArray(width * height)
@@ -382,6 +624,6 @@ private fun decodeQr(bitmap: Bitmap): String {
     return try {
         QRCodeReader().decode(binary, mapOf(DecodeHintType.TRY_HARDER to true)).text
     } catch (_: com.google.zxing.ReaderException) {
-        error("No readable QR code was found.")
+        throw UiFailure(work.text(R.string.msg_scan_not_found))
     }
 }

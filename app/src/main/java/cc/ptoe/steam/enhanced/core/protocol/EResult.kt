@@ -16,6 +16,7 @@ object EResult {
     const val RATE_LIMIT_EXCEEDED: Int = 84
     const val TWO_FACTOR_CODE_MISMATCH: Int = 88
     const val TWO_FACTOR_ACTIVATION_CODE_MISMATCH: Int = 89
+    const val SMS_CODE_FAILED: Int = 94
 
     /** All known codes, keyed by their wire value. */
     val names: Map<Int, String> = mapOf(

@@ -2,11 +2,14 @@ package cc.ptoe.steam.enhanced.app
 
 import android.util.Xml
 import cc.ptoe.steam.enhanced.core.JsonCoerce
+import cc.ptoe.steam.enhanced.core.dlog
 import cc.ptoe.steam.enhanced.core.model.SteamGuardAccount
 import cc.ptoe.steam.enhanced.net.SteamApiClient
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.xmlpull.v1.XmlPullParser
+import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.json.JsonObject
 
 internal object SteamProfile {
     private const val ITEMS = "https://cdn.fastly.steamstatic.com/steamcommunity/public/images/"
@@ -27,13 +30,14 @@ internal object SteamProfile {
         }
         var animated = account.animatedAvatarUrl
         var frame = account.avatarFrameUrl
-        if (account.session.hasAccessToken) {
+        if (account.session.hasAccessToken) try {
             val response = api.apiGetJson("IPlayerService", "GetProfileItemsEquipped", mapOf(
                 "steamid" to account.steamId.toString(),
                 "access_token" to account.session.accessToken.orEmpty(),
                 "language" to api.steamLanguage,
             ))
-            val items = JsonCoerce.asObject(response["response"])
+            val items = response["response"] as? JsonObject
+                ?: error("Steam returned an incomplete equipped-profile response.")
             fun item(key: String): String? {
                 val value = JsonCoerce.asObject(items[key])
                 val path = JsonCoerce.asStringOrNull(value["image_small"])
@@ -44,6 +48,12 @@ internal object SteamProfile {
             }
             animated = item("animated_avatar")
             frame = item("avatar_frame")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            // Equipped items are optional; keep the public nickname/avatar even
+            // when Steam cannot return the animated avatar or frame.
+            dlog("Equipped profile items unavailable: ${failure.javaClass.simpleName}")
         }
         return account.copy(
             personaName = persona?.takeIf(String::isNotBlank) ?: account.personaName,

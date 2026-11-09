@@ -1,5 +1,6 @@
 package cc.ptoe.steam.enhanced.app
 
+import android.os.Build
 import cc.ptoe.steam.enhanced.core.model.SteamGuardAccount
 import cc.ptoe.steam.enhanced.net.SteamApiClient
 import cc.ptoe.steam.enhanced.net.SteamTime
@@ -13,10 +14,12 @@ import cc.ptoe.steam.enhanced.protocol.ConfirmationAuthException
 import cc.ptoe.steam.enhanced.protocol.QrApprovalClient
 import cc.ptoe.steam.enhanced.protocol.SessionsClient
 import cc.ptoe.steam.enhanced.protocol.StoreKeyClient
+import cc.ptoe.steam.enhanced.protocol.SteamAuthSession
 import cc.ptoe.steam.enhanced.protocol.TradeOffersClient
 import cc.ptoe.steam.enhanced.store.AccountStore
 
 internal class SteamServices(private val vault: AccountVault) {
+    private val deviceName = Build.MODEL.orEmpty().trim().ifBlank { "Android" }
     val api = SteamApiClient()
     val time = SteamTime.shared
     val confirmations = ConfirmationsClient(api)
@@ -27,7 +30,14 @@ internal class SteamServices(private val vault: AccountVault) {
     val keys = StoreKeyClient(api)
     val inventory = InventoryClient(api)
     val market = MarketClient(api)
-    private val login = AutoLogin(api)
+    val profiles = ProfileRefresher(
+        accounts = { vault.state.value.accounts },
+        load = { SteamProfile.refresh(api, it) },
+        save = vault::saveProfile,
+    )
+    private val login = AutoLogin(api, deviceName = deviceName)
+
+    fun newAuthSession(): SteamAuthSession = SteamAuthSession(api, deviceName)
 
     suspend fun session(id: Long, force: Boolean = false): SteamGuardAccount {
         val account = vault.state.value.accounts.firstOrNull { AccountStore.storageId(it) == id }

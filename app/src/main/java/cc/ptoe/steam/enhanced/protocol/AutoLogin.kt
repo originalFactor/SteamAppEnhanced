@@ -39,6 +39,7 @@ enum class AutoLoginOutcome {
 class AutoLogin(
     private val api: SteamApiClient,
     private val steamTime: SteamTime = SteamTime.shared,
+    private val deviceName: String = "Android",
 ) {
     /**
      * Re-establishes [account]'s session from scratch using [password] and the
@@ -53,7 +54,7 @@ class AutoLogin(
         val username = account.accountName
         if (username.isNullOrEmpty()) return account to AutoLoginOutcome.FAILED
         return try {
-            val session = SteamAuthSession(api)
+            val session = SteamAuthSession(api, deviceName)
             session.beginWithCredentials(username, password)
 
             when {

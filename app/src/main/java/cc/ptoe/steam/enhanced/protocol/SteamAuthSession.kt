@@ -53,7 +53,11 @@ data class PollResult(
  * The session is a mutable object because begin/poll round-trips carry
  * `client_id` and `request_id` forward.
  */
-class SteamAuthSession(private val api: SteamApiClient) {
+class SteamAuthSession(
+    private val api: SteamApiClient,
+    deviceName: String = "Android",
+) {
+    private val deviceName = deviceName.trim().ifBlank { "Android" }
 
     var clientId: Long = 0L
         private set
@@ -65,6 +69,22 @@ class SteamAuthSession(private val api: SteamApiClient) {
         private set
     var qrChallengeUrl: String? = null
         private set
+    private var weakToken: String? = null
+
+    val canRecoverAuthenticator: Boolean
+        get() = steamId > 0L && !weakToken.isNullOrBlank() &&
+            allowedConfirmations.any { it == GuardType.DEVICE_CODE || it == GuardType.DEVICE_CONFIRMATION }
+
+    /** The weak token authorizes only the recovery challenge, not a saved login. */
+    fun newAuthenticatorRecovery(): AuthenticatorRecovery {
+        check(canRecoverAuthenticator) { "Steam did not offer authenticator recovery for this sign-in." }
+        return AuthenticatorRecovery(api, steamId, checkNotNull(weakToken))
+    }
+
+    val acceptsApproval: Boolean
+        get() = allowedConfirmations.any {
+            it == GuardType.DEVICE_CONFIRMATION || it == GuardType.EMAIL_CONFIRMATION
+        }
 
     /** EAuthTokenPlatformType.MobileApp — makes logins look like the phone app. */
     private val platformMobileApp = 3
@@ -76,6 +96,7 @@ class SteamAuthSession(private val api: SteamApiClient) {
      * them before [poll] can complete.
      */
     suspend fun beginWithCredentials(username: String, password: String) {
+        reset()
         // 1. RSA public key for the account. Per-session, so it cannot be cached.
         val rsaReq = ProtoWriter().writeString(1, username)
         val rsaResp = api.callProtobuf(
@@ -86,13 +107,16 @@ class SteamAuthSession(private val api: SteamApiClient) {
         ).parse()
         val modulusHex = rsaResp[1]?.asString ?: error("no rsa modulus")
         val exponentHex = rsaResp[2]?.asString ?: error("no rsa exponent")
-        val timestamp = rsaResp[3]?.asInt?.toLong() ?: 0L
+        // Dart's int in the upstream implementation is 64-bit. Kotlin's
+        // ProtoField.asInt truncates this uint64 and breaks RSA key matching.
+        val timestamp = rsaResp[3]?.takeIf { it.wireType == 0 }?.varint
+            ?: error("Steam did not return an RSA key timestamp. Start sign-in again.")
 
         val encryptedPassword = SteamRsa.encryptPassword(password, modulusHex, exponentHex)
 
         // 2. Begin the session.
         val req = ProtoWriter()
-            .writeString(1, "AVA")
+            .writeString(1, deviceName)
             .writeString(2, username)
             .writeString(3, encryptedPassword)
             .writeUint64(4, timestamp)
@@ -115,8 +139,9 @@ class SteamAuthSession(private val api: SteamApiClient) {
      * as a QR code.
      */
     suspend fun beginWithQr(): String {
+        reset()
         val req = ProtoWriter()
-            .writeString(1, "AVA")
+            .writeString(1, deviceName)
             .writeVarint(2, platformMobileApp)
             .writeMessage(3, deviceDetails())
             .writeString(4, "Mobile")
@@ -134,15 +159,17 @@ class SteamAuthSession(private val api: SteamApiClient) {
      * Parses a BeginAuthSession response.
      *
      * Credentials: 1=client_id, 2=request_id(bytes), 4=allowed_confirmations[],
-     * 5=steamid.
+     * 5=steamid, 6=weak_token (recovery only).
      * QR:          1=client_id, 2=challenge_url(string), 3=request_id(bytes),
-     * 5=allowed_confirmations[], 7=version.
+     * 5=allowed_confirmations[], 6=version.
      */
     private fun consumeBeginResponse(fields: List<ProtoField>, isQr: Boolean) {
+        reset()
         val confs = mutableListOf<GuardType>()
         val confField = if (isQr) 5 else 4
         for (f in fields) {
             when {
+                f.number == 6 && !isQr && f.wireType == 2 -> weakToken = f.asString.takeIf(String::isNotBlank)
                 f.number == 1 -> clientId = f.varint ?: 0L
                 f.number == 2 && isQr -> qrChallengeUrl = f.asString
                 f.number == 2 -> requestId = f.bytes ?: ByteArray(0)
@@ -156,12 +183,27 @@ class SteamAuthSession(private val api: SteamApiClient) {
                 f.number == 5 && !isQr && f.wireType == 0 -> steamId = f.varint ?: 0L
             }
         }
-        if (confs.isNotEmpty()) allowedConfirmations = confs
+        check(clientId != 0L && requestId.isNotEmpty()) {
+            "Steam returned an incomplete sign-in session. Start sign-in again."
+        }
+        if (isQr) check(!qrChallengeUrl.isNullOrBlank()) {
+            "Steam did not return a sign-in QR code. Start sign-in again."
+        }
+        allowedConfirmations = confs
         dlog(
             "begin(${if (isQr) "qr" else "creds"}): clientId=$clientId " +
                 "requestId=${requestId.size}B steamId=$steamId " +
                 "confs=${allowedConfirmations.joinToString(",") { it.name }}",
         )
+    }
+
+    private fun reset() {
+        clientId = 0L
+        steamId = 0L
+        requestId = ByteArray(0)
+        qrChallengeUrl = null
+        weakToken = null
+        allowedConfirmations = emptyList()
     }
 
     /**
@@ -204,6 +246,7 @@ class SteamAuthSession(private val api: SteamApiClient) {
         if (!newChallenge.isNullOrEmpty()) qrChallengeUrl = newChallenge
 
         val complete = !refreshToken.isNullOrEmpty()
+        if (complete) weakToken = null
         return PollResult(
             complete = complete,
             accessToken = accessToken,
@@ -238,7 +281,7 @@ class SteamAuthSession(private val api: SteamApiClient) {
      * gaming_device_type 528) so logins look like the official app.
      */
     private fun deviceDetails(): ProtoWriter = ProtoWriter()
-        .writeString(1, "AVA") // device_friendly_name
+        .writeString(1, deviceName) // device_friendly_name
         .writeVarint(2, platformMobileApp) // platform_type
         .writeVarint(3, -500) // os_type = EOSType.AndroidUnknown
         .writeVarint(4, 528) // gaming_device_type

@@ -24,6 +24,9 @@ data class FamilyMember(
     val timeJoined: Long,
 )
 
+/** Public profile fields; Steam account login names are not part of this response. */
+data class FamilyPersona(val nickname: String? = null, val avatarUrl: String? = null)
+
 /** Read-only snapshot of a family group (CFamilyGroups_GetFamilyGroup_Response). */
 data class FamilyGroupInfo(
     val name: String,

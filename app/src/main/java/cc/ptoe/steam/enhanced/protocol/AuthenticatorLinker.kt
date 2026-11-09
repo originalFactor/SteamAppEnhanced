@@ -256,6 +256,7 @@ class AuthenticatorLinker(
             return when (e.eresult) {
                 EResult.ACCOUNT_LOCKED_DOWN -> LinkResult.ACCOUNT_LOCKED
                 EResult.RATE_LIMIT_EXCEEDED -> LinkResult.RATE_LIMITED
+                EResult.SMS_CODE_FAILED -> LinkResult.BAD_CHALLENGE_CODE
                 else -> LinkResult.GENERAL_FAILURE
             }
         }

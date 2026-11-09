@@ -1,5 +1,6 @@
 package cc.ptoe.steam.enhanced.app
 
+import cc.ptoe.steam.enhanced.R
 import android.app.Activity
 import android.content.Context
 import android.hardware.biometrics.BiometricManager
@@ -22,9 +23,9 @@ import kotlinx.coroutines.withContext
 
 /** Auth-per-operation Keystore key. Device authentication retrieves only the vault key. */
 @RequiresApi(30)
-internal class DeviceUnlock(private val activity: Activity) {
+internal class DeviceUnlock(private val activity: Activity) : DeviceVaultUnlock {
     private val prefs = activity.getSharedPreferences("device_unlock", Context.MODE_PRIVATE)
-    val enabled: Boolean get() = prefs.contains(RECORD)
+    override val enabled: Boolean get() = prefs.contains(RECORD)
     val available: Boolean
         get() = activity.getSystemService(BiometricManager::class.java)
             .canAuthenticate(AUTHENTICATORS) == BiometricManager.BIOMETRIC_SUCCESS
@@ -33,7 +34,7 @@ internal class DeviceUnlock(private val activity: Activity) {
         val cipher = withContext(Dispatchers.IO) {
             Cipher.getInstance(CIPHER).apply { init(Cipher.ENCRYPT_MODE, key(create = true)) }
         }
-        val authorized = authenticate(cipher, "Enable device unlock") ?: return false
+        val authorized = authenticate(cipher, activity.getString(R.string.msg_biometric_enable)) ?: return false
         withContext(Dispatchers.IO) {
             val ciphertext = Base64.encode(authorized.iv + authorized.doFinal(dek))
             check(prefs.edit().putString(RECORD, ciphertext).commit()) { "Could not save device unlock." }
@@ -41,7 +42,7 @@ internal class DeviceUnlock(private val activity: Activity) {
         return true
     }
 
-    suspend fun unlock(): ByteArray? {
+    override suspend fun unlock(): ByteArray? {
         val (cipher, bytes) = withContext(Dispatchers.IO) {
             val stored = prefs.getString(RECORD, null) ?: error("Device unlock is disabled.")
             val bytes = Base64.decode(stored)
@@ -50,7 +51,7 @@ internal class DeviceUnlock(private val activity: Activity) {
             }
             cipher to bytes
         }
-        val authorized = authenticate(cipher, "Unlock Steam Guard") ?: return null
+        val authorized = authenticate(cipher, activity.getString(R.string.ava_unlock_title)) ?: return null
         return withContext(Dispatchers.IO) { authorized.doFinal(bytes, 12, bytes.size - 12) }
     }
 

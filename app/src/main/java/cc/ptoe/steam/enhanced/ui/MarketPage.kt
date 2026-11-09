@@ -6,7 +6,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -27,13 +26,19 @@ import cc.ptoe.steam.enhanced.core.model.WalletInfo
 import cc.ptoe.steam.enhanced.protocol.InventoryOverview
 import cc.ptoe.steam.enhanced.store.AccountStore
 import kotlinx.coroutines.delay
+import top.yukonga.miuix.kmp.basic.ScrollBehavior
 import top.yukonga.miuix.kmp.basic.TabRow
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
-internal fun MarketPage(account: SteamGuardAccount, services: SteamServices, work: AppWork) {
+internal fun MarketPage(
+    account: SteamGuardAccount,
+    services: SteamServices,
+    work: AppWork,
+    scrollBehavior: ScrollBehavior? = null,
+) {
     val id = AccountStore.storageId(account)
     var tab by remember { mutableIntStateOf(0) }
     var overview by remember { mutableStateOf<InventoryOverview?>(null) }
@@ -66,58 +71,58 @@ internal fun MarketPage(account: SteamGuardAccount, services: SteamServices, wor
         } else loadListings()
     }
 
-    LaunchedEffect(tab) { work.run { reload() } }
     val selectedSale = sale
     val wallet = overview?.wallet
     if (selectedSale != null && wallet != null) {
-        SellPanel(account, selectedSale, wallet, services, work, close = { sale = null }) {
+        SellPanel(account, selectedSale, wallet, services, work, scrollBehavior, close = { sale = null }) {
             sale = null
             game?.let { loadGame(it) }
         }
         return
     }
 
-    TabRow(listOf(stringResource(R.string.ava_market_tab_inventory), stringResource(R.string.ava_market_tab_listings)), tab, { if (!work.busy) tab = it })
-    Entry(stringResource(R.string.ava_common_refresh), !work.busy) { work.run { reload() } }
-    if (tab == 0) {
-        val selectedGame = game
-        if (selectedGame == null) {
-            if (overview?.games?.isEmpty() == true) Text("No games with inventory.")
-            overview?.games?.forEach { entry ->
-                Entry("${entry.name.ifBlank { entry.appid.toString() }} · ${entry.itemCount}", !work.busy) {
-                    work.run { loadGame(entry) }
+    RefreshableColumn(work, onRefresh = { reload() }, scrollBehavior = scrollBehavior, initialRefresh = true, refreshKey = tab) {
+        TabRow(listOf(stringResource(R.string.ava_market_tab_inventory), stringResource(R.string.ava_market_tab_listings)), tab, { if (!work.busy) tab = it })
+        if (tab == 0) {
+            val selectedGame = game
+            if (selectedGame == null) {
+                if (overview?.games?.isEmpty() == true) Text(work.text(R.string.msg_inventory_no_games))
+                overview?.games?.forEach { entry ->
+                    Entry("${entry.name.ifBlank { entry.appid.toString() }} · ${entry.itemCount}", !work.busy) {
+                        work.run { loadGame(entry) }
+                    }
+                }
+            } else {
+                Heading(selectedGame.name)
+                Entry(work.text(R.string.msg_inventory_choose_game), !work.busy) { game = null }
+                if (items.isEmpty()) Text(stringResource(R.string.ava_market_no_items))
+                if (wallet == null) Text(work.text(R.string.msg_market_no_wallet))
+                val groups = items.groupBy { Triple(it.classId, it.instanceId, it.marketable) }
+                for (group in groups.values) Panel {
+                    val item = group.first()
+                    Heading(item.name.ifBlank { work.text(R.string.msg_inventory_item) })
+                    if (item.type.isNotBlank()) Text(item.type)
+                    Text(work.text(R.string.msg_quantity, group.sumOf { it.amount.toLong() }))
+                    if (item.marketable && wallet != null) Entry(stringResource(R.string.ava_market_list_button), !work.busy) { sale = group }
+                }
+                cursor?.let { token ->
+                    Entry(work.text(R.string.msg_inventory_load_more), !work.busy) { work.run { loadGame(selectedGame, token) } }
                 }
             }
         } else {
-            Heading(selectedGame.name)
-            Entry("Choose another game", !work.busy) { game = null }
-            if (items.isEmpty()) Text(stringResource(R.string.ava_market_no_items))
-            if (wallet == null) Text("Steam did not return wallet fees. Selling is unavailable.")
-            val groups = items.groupBy { Triple(it.classId, it.instanceId, it.marketable) }
-            for (group in groups.values) Panel {
-                val item = group.first()
-                Heading(item.name.ifBlank { "Inventory item" })
-                if (item.type.isNotBlank()) Text(item.type)
-                Text("Quantity ${group.sumOf { it.amount.toLong() }}")
-                if (item.marketable && wallet != null) Entry(stringResource(R.string.ava_market_list_button), !work.busy) { sale = group }
-            }
-            cursor?.let { token ->
-                Entry("Load more items", !work.busy) { work.run { loadGame(selectedGame, token) } }
-            }
-        }
-    } else {
-        if (listings?.isEmpty() == true) Text(stringResource(R.string.ava_market_no_listings))
-        for (listing in listings.orEmpty()) Panel {
-            Heading(listing.name.ifBlank { listing.marketHashName })
-            Text("Buyer pays ${listing.buyerPrice} · Fee ${listing.fee} (minor units)")
-            Entry(stringResource(R.string.ava_market_cancel), !work.busy) {
-                work.ask("Cancel listing?", "Steam will return the unsold item to your inventory.", "Cancel listing") {
-                    check(services.market.cancel(services.session(id), listing.listingId)) { "Steam did not cancel this listing." }
-                    loadListings()
+            if (listings?.isEmpty() == true) Text(stringResource(R.string.ava_market_no_listings))
+            for (listing in listings.orEmpty()) Panel {
+                Heading(listing.name.ifBlank { listing.marketHashName })
+                Text(work.text(R.string.msg_market_listing_price, listing.buyerPrice, listing.fee))
+                Entry(stringResource(R.string.ava_market_cancel), !work.busy) {
+                    work.ask(work.text(R.string.msg_market_cancel_question), work.text(R.string.msg_market_cancel_warning), work.text(R.string.ava_market_cancel)) {
+                        checkUi(services.market.cancel(services.session(id), listing.listingId)) { work.text(R.string.msg_market_cancel_failed) }
+                        loadListings()
+                    }
                 }
             }
+            if (moreListings) Entry(work.text(R.string.msg_market_load_more), !work.busy) { work.run { loadListings(listingPage + 100) } }
         }
-        if (moreListings) Entry("Load more listings", !work.busy) { work.run { loadListings(listingPage + 100) } }
     }
 }
 
@@ -128,6 +133,7 @@ private fun SellPanel(
     wallet: WalletInfo,
     services: SteamServices,
     work: AppWork,
+    scrollBehavior: ScrollBehavior?,
     close: () -> Unit,
     onSold: suspend () -> Unit,
 ) {
@@ -144,97 +150,96 @@ private fun SellPanel(
     val maxQuantity = items.count { it.amount > 0 }.coerceAtMost(20)
     val count = quantity.toIntOrNull()?.takeIf { it in 1..maxQuantity }
 
-    Panel {
-        Heading(item.name)
-        Text("Enter the unit price in your wallet's minor units (currency ${wallet.currency}).")
-        Entry(stringResource(R.string.ava_common_refresh_67), !work.busy) {
-            work.run {
-                quote = services.market.price(item, wallet.currency)
-                history = services.read(id) { services.market.priceHistory(it, item) }
-                if (quote == null && history.isEmpty()) work.feedback = "Steam did not return price data."
+    RefreshableColumn(work, onRefresh = {
+        quote = services.market.price(item, wallet.currency)
+        history = services.read(id) { services.market.priceHistory(it, item) }
+        if (quote == null && history.isEmpty()) work.feedback = work.text(R.string.msg_market_no_prices)
+    }, scrollBehavior = scrollBehavior, initialRefresh = true, refreshKey = item.assetId) {
+        Panel {
+            Heading(item.name)
+            Text(work.text(R.string.msg_market_price_prompt, wallet.currency))
+            quote?.let { Text(work.text(R.string.msg_market_price_quote, it.lowest ?: "—", it.median ?: "—")) }
+            if (history.size > 1) PriceTrend(history)
+            Field(stringResource(R.string.ava_market_you_receive), receive, number = true, enabled = !work.busy) {
+                receive = it.filter(Char::isDigit).take(9)
+                buyer = receive.toIntOrNull()?.takeIf { amount -> amount in 1..100_000_000 }
+                    ?.let { amount -> fees.buyerPays(amount, item.publisherFeePct).toString() }.orEmpty()
             }
-        }
-        quote?.let { Text("Lowest ${it.lowest ?: "—"} · Median ${it.median ?: "—"}") }
-        if (history.size > 1) PriceTrend(history)
-        Field(stringResource(R.string.ava_market_you_receive), receive, number = true, enabled = !work.busy) {
-            receive = it.filter(Char::isDigit).take(9)
-            buyer = receive.toIntOrNull()?.takeIf { amount -> amount in 1..100_000_000 }
-                ?.let { amount -> fees.buyerPays(amount, item.publisherFeePct).toString() }.orEmpty()
-        }
-        Field(stringResource(R.string.ava_market_buyer_pays), buyer, number = true, enabled = !work.busy) {
-            buyer = it.filter(Char::isDigit).take(9)
-            receive = buyer.toIntOrNull()?.takeIf { amount -> amount in 1..100_000_000 }
-                ?.let { amount -> fees.receiveFromTotal(amount, item.publisherFeePct)?.toString() }.orEmpty()
-        }
-        Field("Quantity (up to $maxQuantity)", quantity, number = true, enabled = !work.busy) { quantity = it.take(2) }
-        SwitchPreference(
-            checked = autoApprove, onCheckedChange = { autoApprove = it },
-            title = "Confirm these listings automatically",
-            summary = "Requires an exact listing ID from Steam.",
-            enabled = !work.busy && !account.identitySecret.isNullOrBlank(),
-        )
-        Primary(stringResource(R.string.ava_market_list_button), !work.busy && unitPrice != null && count != null) {
-            val price = unitPrice ?: return@Primary
-            val amount = count ?: return@Primary
-            val total = fees.buyerPays(price, item.publisherFeePct)
-            work.ask("List $amount item(s)?", "You receive $price and the buyer pays $total per item, in wallet minor units.", "List") {
-                val current = services.session(id)
-                if (autoApprove && !services.time.isAligned) services.time.align()
-                var remaining = amount
-                var confirmed = 0
-                var pending = 0
-                var failure: String? = null
-                val ids = mutableSetOf<String>()
-                for (asset in items.asSequence().filter { it.amount > 0 }.take(amount)) {
-                    val result = try {
-                        services.market.sell(current, asset, price)
-                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        failure = "Steam did not confirm the last request. Check your inventory and listings before retrying."
-                        break
-                    }
-                    if (!result.success) {
-                        failure = result.message ?: "Steam rejected a listing."
-                        break
-                    }
-                    remaining--
-                    if (result.confirmation) {
-                        pending++
-                        result.listingId?.let(ids::add)
-                    }
-                }
-                if (autoApprove && ids.isNotEmpty()) {
-                    try {
-                        delay(600)
-                        val matching = services.confirmations.fetch(current)
-                            .filter { it.type == ConfirmationType.MARKET_LISTING && it.creatorId in ids }
-                        for (confirmation in matching) {
-                            if (services.confirmations.respond(current, confirmation, accept = true)) confirmed++
+            Field(stringResource(R.string.ava_market_buyer_pays), buyer, number = true, enabled = !work.busy) {
+                buyer = it.filter(Char::isDigit).take(9)
+                receive = buyer.toIntOrNull()?.takeIf { amount -> amount in 1..100_000_000 }
+                    ?.let { amount -> fees.receiveFromTotal(amount, item.publisherFeePct)?.toString() }.orEmpty()
+            }
+            Field(work.text(R.string.msg_quantity_limit, maxQuantity), quantity, number = true, enabled = !work.busy) { quantity = it.take(2) }
+            SwitchPreference(
+                checked = autoApprove, onCheckedChange = { autoApprove = it },
+                title = work.text(R.string.msg_market_auto_confirm),
+                summary = work.text(R.string.msg_market_exact_id),
+                enabled = !work.busy && !account.identitySecret.isNullOrBlank(),
+            )
+            Primary(stringResource(R.string.ava_market_list_button), !work.busy && unitPrice != null && count != null) {
+                val price = unitPrice ?: return@Primary
+                val amount = count ?: return@Primary
+                val total = fees.buyerPays(price, item.publisherFeePct)
+                work.ask(work.text(R.string.msg_market_sell_question, amount), work.text(R.string.msg_market_sell_warning, price, total), "List") {
+                    val current = services.session(id)
+                    if (autoApprove && !services.time.isAligned) services.time.align()
+                    var remaining = amount
+                    var confirmed = 0
+                    var pending = 0
+                    var failure: String? = null
+                    val ids = mutableSetOf<String>()
+                    for (asset in items.asSequence().filter { it.amount > 0 }.take(amount)) {
+                        val result = try {
+                            services.market.sell(current, asset, price)
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            failure = work.text(R.string.msg_market_uncertain)
+                            break
                         }
+                        if (!result.success) {
+                            failure = result.message ?: work.text(R.string.msg_market_rejected)
+                            break
+                        }
+                        remaining--
+                        if (result.confirmation) {
+                            pending++
+                            result.listingId?.let(ids::add)
+                        }
+                    }
+                    if (autoApprove && ids.isNotEmpty()) {
+                        try {
+                            delay(600)
+                            val matching = services.confirmations.fetch(current)
+                                .filter { it.type == ConfirmationType.MARKET_LISTING && it.creatorId in ids }
+                            for (confirmation in matching) {
+                                if (services.confirmations.respond(current, confirmation, accept = true)) confirmed++
+                            }
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            // The listing is already submitted. Keep manual approval available.
+                        }
+                    }
+                    close()
+                    val summary = buildString {
+                        append(work.text(R.string.msg_market_submitted, amount - remaining, amount))
+                        if (pending > confirmed) append("\n" + work.text(R.string.msg_market_confirm_pending, pending - confirmed))
+                        if (failure != null) append("\n$failure")
+                    }
+                    work.feedback = summary
+                    try {
+                        onSold()
                     } catch (cancelled: kotlinx.coroutines.CancellationException) {
                         throw cancelled
                     } catch (_: Exception) {
-                        // The listing is already submitted. Keep manual approval available.
+                        work.feedback = summary + "\n" + work.text(R.string.msg_market_refresh_status)
                     }
                 }
-                close()
-                val summary = buildString {
-                    append("Submitted ${amount - remaining} of $amount items.")
-                    if (pending > confirmed) append(" Complete ${pending - confirmed} listing confirmations in the pending center.")
-                    if (failure != null) append(" $failure")
-                }
-                work.feedback = summary
-                try {
-                    onSold()
-                } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    work.feedback = "$summary Refresh the inventory to see the latest status."
-                }
             }
+            Entry(work.text(R.string.msg_inventory_back), !work.busy, close)
         }
-        Entry("Back to inventory", !work.busy, close)
     }
 }
 

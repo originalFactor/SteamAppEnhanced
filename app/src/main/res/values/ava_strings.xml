@@ -75,8 +75,6 @@
     <string name="ava_sync_title_76">"Encrypted WebDAV sync"</string>
     <string name="ava_theme_dark">"Dark"</string>
     <string name="ava_theme_light">"Light"</string>
-    <string name="ava_theme_neon">"Neon"</string>
-    <string name="ava_theme_pixel">"Pixel"</string>
     <string name="ava_theme_system">"System"</string>
     <string name="ava_unlock_title">"Unlock Steam Guard"</string>
     <string name="ava_unlock_with_biometric">"Unlock with device security"</string>
@@ -84,4 +82,9 @@
     <string name="ava_welcome_login_sub">"Set up a new authenticator"</string>
     <string name="ava_hold_to">Hold to %1$s</string>
     <string name="ava_hold_action">Confirm action</string>
+    <string name="ava_login_err_invalid_password">Wrong account name or password.</string>
+    <string name="ava_login_err_rate_limited">Too many attempts — please wait a while and try again.</string>
+    <string name="ava_login_err_code_mismatch">That code didn\'t match — check it and try again.</string>
+    <string name="ava_login_failed">Login failed: %1$s</string>
+    <string name="ava_pro_err_network">Network error — try again later.</string>
 </resources>
