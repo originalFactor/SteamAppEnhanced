@@ -203,13 +203,10 @@ class SteamApiClientTest {
             MockResponse().setResponseCode(302)
                 .setHeader("Location", "https://evil.example/steal"),
         )
-        // The loop refuses to follow off-origin, so it returns the redirect body
-        // (empty) rather than shipping steamLoginSecure to a rogue host.
-        val body = api.communityGetText(
-            "/profiles/1/inventory/",
-            cookies = mapOf("steamLoginSecure" to "1||tok"),
-        )
-        assertEquals("", body)
+        // Reject the failed response without forwarding credentials off-origin.
+        kotlin.test.assertFailsWith<SteamApiException> {
+            api.communityGetText("/profiles/1/inventory/", cookies = mapOf("steamLoginSecure" to "1||tok"))
+        }
         assertEquals(1, server.requestCount) // no second request was made
     }
 

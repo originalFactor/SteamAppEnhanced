@@ -15,6 +15,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.IOException
 import kotlin.io.encoding.Base64
 import java.util.concurrent.TimeUnit
@@ -31,8 +32,8 @@ import kotlin.coroutines.resumeWithException
  *  - `steamcommunity.com` / `store.steampowered.com` JSON calls (mobileconf,
  *    market, tradeoffer, ajaxregisterkey).
  *
- * Every call is a suspend function running on OkHttp's dispatcher via the
- * callback bridge, so no thread is blocked waiting on the network.
+ * Requests and streamed response reads run on OkHttp's dispatcher. The callback
+ * bridge hands callers an in-memory body so UI callers never read a socket.
  */
 class SteamApiClient(
     /** Community language (`l` query param) for localized strings. */
@@ -272,6 +273,9 @@ class SteamApiClient(
             dlog("  ✗ $path HTTP $code (stale session?)")
             throw CommunityAuthException(code, path)
         }
+        if (code !in 200..299) {
+            throw SteamApiException(if (code == 429) EResult.RATE_LIMIT_EXCEEDED else EResult.FAIL, "HTTP $code", path, code)
+        }
         dlog("← $path  HTTP $code  ${body.length}B")
         return body
     }
@@ -477,7 +481,12 @@ class SteamApiClient(
 
     private suspend fun execute(request: Request): Response =
         suspendCancellableCoroutine { cont ->
-            val call = http.newCall(request)
+            val prepared = request.newBuilder().apply {
+                MOBILE_HEADERS.forEach { (name, value) ->
+                    if (request.header(name) == null) header(name, value)
+                }
+            }.build()
+            val call = http.newCall(prepared)
             cont.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
@@ -486,7 +495,22 @@ class SteamApiClient(
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    if (cont.isActive) cont.resume(response) else response.close()
+                    if (!cont.isActive) {
+                        response.close()
+                        return
+                    }
+                    try {
+                        // enqueue() only delivers headers; body.string()/bytes()
+                        // may still block on the socket. Consume and close the
+                        // original here, before resuming a Main-thread caller.
+                        val buffered = response.use { original ->
+                            val body = original.body
+                            original.newBuilder().body(body.bytes().toResponseBody(body.contentType())).build()
+                        }
+                        cont.resume(buffered) { _, droppedResponse, _ -> droppedResponse.close() }
+                    } catch (failure: Exception) {
+                        if (cont.isActive) cont.resumeWithException(failure)
+                    }
                 }
             })
         }
