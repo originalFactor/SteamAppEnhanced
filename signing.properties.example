@@ -1,0 +1,4 @@
+storeFile=.signing/steam-enhanced-release.p12
+storePassword=YOUR_KEYSTORE_PASSWORD
+keyAlias=steam-enhanced-release
+keyPassword=YOUR_KEY_PASSWORD
